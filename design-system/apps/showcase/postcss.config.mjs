@@ -1,0 +1,1 @@
+export { default } from "@donalabs/ui/postcss.config";

@@ -1,0 +1,119 @@
+# =============================================================================
+# Plausible Analytics (Community Edition) — privacy-friendly web analytics
+# Part of the DonaLabs shared infrastructure.
+# Stack: Plausible app + dedicated Postgres 16 + dedicated ClickHouse 24.12.
+# Adapted from https://github.com/plausible/community-edition (v3.2.1).
+# =============================================================================
+
+services:
+  plausible_db:
+    image: postgres:16-alpine
+    container_name: donalabs-plausible-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PLAUSIBLE_DB_USER:-plausible}
+      POSTGRES_PASSWORD: ${PLAUSIBLE_DB_PASSWORD}
+      POSTGRES_DB: ${PLAUSIBLE_DB_NAME:-plausible}
+      TZ: ${TZ:-UTC}
+    volumes:
+      - plausible_db_data:/var/lib/postgresql/data
+    networks:
+      - plausible_internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PLAUSIBLE_DB_USER:-plausible} -d ${PLAUSIBLE_DB_NAME:-plausible}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 1m
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  plausible_events_db:
+    image: clickhouse/clickhouse-server:24.12-alpine
+    container_name: donalabs-plausible-clickhouse
+    restart: unless-stopped
+    environment:
+      - CLICKHOUSE_SKIP_USER_SETUP=1
+    volumes:
+      - plausible_event_data:/var/lib/clickhouse
+      - plausible_event_logs:/var/log/clickhouse-server
+      - ./clickhouse/logs.xml:/etc/clickhouse-server/config.d/logs.xml:ro
+      - ./clickhouse/ipv4-only.xml:/etc/clickhouse-server/config.d/ipv4-only.xml:ro
+      - ./clickhouse/low-resources.xml:/etc/clickhouse-server/config.d/low-resources.xml:ro
+      - ./clickhouse/default-profile-low-resources-overrides.xml:/etc/clickhouse-server/users.d/default-profile-low-resources-overrides.xml:ro
+    ulimits:
+      nofile:
+        # Official Plausible value is 262144. Some constrained hosts/sandboxes
+        # cap the hard limit lower; override with PLAUSIBLE_CH_NOFILE if needed.
+        soft: ${PLAUSIBLE_CH_NOFILE:-262144}
+        hard: ${PLAUSIBLE_CH_NOFILE:-262144}
+    networks:
+      - plausible_internal
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 -O - http://127.0.0.1:8123/ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 1m
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  plausible:
+    image: ghcr.io/plausible/community-edition:${PLAUSIBLE_IMAGE_TAG:-v3.2.1}
+    container_name: donalabs-plausible
+    restart: unless-stopped
+    command: sh -c "/entrypoint.sh db createdb && /entrypoint.sh db migrate && /entrypoint.sh run"
+    depends_on:
+      plausible_db:
+        condition: service_healthy
+      plausible_events_db:
+        condition: service_healthy
+    environment:
+      TMPDIR: /var/lib/plausible/tmp
+      # --- required ---
+      BASE_URL: ${PLAUSIBLE_BASE_URL:-http://localhost:8210}
+      SECRET_KEY_BASE: ${PLAUSIBLE_SECRET_KEY_BASE}
+      # --- registration / security ---
+      TOTP_VAULT_KEY: ${PLAUSIBLE_TOTP_VAULT_KEY}
+      DISABLE_REGISTRATION: ${PLAUSIBLE_DISABLE_REGISTRATION:-false}
+      # --- web ---
+      HTTP_PORT: "8000"
+      # --- databases ---
+      DATABASE_URL: postgres://${PLAUSIBLE_DB_USER:-plausible}:${PLAUSIBLE_DB_PASSWORD}@plausible_db:5432/${PLAUSIBLE_DB_NAME:-plausible}
+      CLICKHOUSE_DATABASE_URL: http://plausible_events_db:8123/plausible_events_db
+      TZ: ${TZ:-UTC}
+    volumes:
+      - plausible_data:/var/lib/plausible
+    ulimits:
+      nofile:
+        # Official Plausible value is 65535; override with PLAUSIBLE_APP_NOFILE
+        # on hosts/sandboxes that cap the hard limit lower.
+        soft: ${PLAUSIBLE_APP_NOFILE:-65535}
+        hard: ${PLAUSIBLE_APP_NOFILE:-65535}
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${PLAUSIBLE_HOST_PORT:-8210}:8000"
+    networks:
+      - edge
+      - plausible_internal
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+volumes:
+  plausible_data:
+    name: donalabs_plausible_data
+  plausible_db_data:
+    name: donalabs_plausible_db_data
+  plausible_event_data:
+    name: donalabs_plausible_event_data
+  plausible_event_logs:
+    name: donalabs_plausible_event_logs
+
+networks:
+  edge:
+    external: true
+    name: ${EDGE_NETWORK:-donalabs_edge}
+  plausible_internal:
+    name: donalabs_plausible_internal

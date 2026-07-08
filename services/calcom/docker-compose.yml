@@ -1,0 +1,85 @@
+# =============================================================================
+# Cal.com — scheduling / bookings platform (dedicated Postgres 16)
+# Part of the DonaLabs shared infrastructure.
+#
+# NOTE: the prebuilt calcom/cal.com image bakes NEXT_PUBLIC_WEBAPP_URL at BUILD
+# time, so it only works at http://localhost:3000 out of the box. To serve a
+# custom domain, rebuild the image — see services/calcom/README.md.
+# =============================================================================
+
+services:
+  calcom_db:
+    image: postgres:16-alpine
+    container_name: donalabs-calcom-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${CALCOM_DB_USER:-calcom}
+      POSTGRES_PASSWORD: ${CALCOM_DB_PASSWORD}
+      POSTGRES_DB: ${CALCOM_DB_NAME:-calendso}
+      TZ: ${TZ:-UTC}
+    volumes:
+      - calcom_db_data:/var/lib/postgresql/data
+    networks:
+      - calcom_internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${CALCOM_DB_USER:-calcom} -d ${CALCOM_DB_NAME:-calendso}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  calcom:
+    image: calcom/cal.com:${CALCOM_IMAGE_TAG:-v6.2.0}
+    container_name: donalabs-calcom
+    restart: unless-stopped
+    depends_on:
+      calcom_db:
+        condition: service_healthy
+    environment:
+      # Public URL (baked at build time in the prebuilt image → keep localhost:3000).
+      NEXT_PUBLIC_WEBAPP_URL: ${CALCOM_WEBAPP_URL:-http://localhost:3000}
+      NEXT_PUBLIC_LICENSE_CONSENT: ${CALCOM_LICENSE_CONSENT:-agree}
+      # NextAuth: URL must match the webapp URL and resolve from inside the container.
+      NEXTAUTH_URL: ${CALCOM_WEBAPP_URL:-http://localhost:3000}
+      NEXTAUTH_SECRET: ${CALCOM_NEXTAUTH_SECRET}
+      # AES-256 key for stored OAuth/calendar credentials — NEVER change after first use.
+      CALENDSO_ENCRYPTION_KEY: ${CALCOM_ENCRYPTION_KEY}
+      # Prisma connection strings (pooled + direct-for-migrations are identical here).
+      DATABASE_URL: postgresql://${CALCOM_DB_USER:-calcom}:${CALCOM_DB_PASSWORD}@calcom_db:5432/${CALCOM_DB_NAME:-calendso}
+      DATABASE_DIRECT_URL: postgresql://${CALCOM_DB_USER:-calcom}:${CALCOM_DB_PASSWORD}@calcom_db:5432/${CALCOM_DB_NAME:-calendso}
+      # Optional outbound email
+      EMAIL_FROM: ${CALCOM_EMAIL_FROM:-}
+      EMAIL_SERVER_HOST: ${CALCOM_SMTP_HOST:-}
+      EMAIL_SERVER_PORT: ${CALCOM_SMTP_PORT:-587}
+      EMAIL_SERVER_USER: ${CALCOM_SMTP_USER:-}
+      EMAIL_SERVER_PASSWORD: ${CALCOM_SMTP_PASSWORD:-}
+      TZ: ${TZ:-UTC}
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${CALCOM_HOST_PORT:-3000}:3000"
+    networks:
+      - edge
+      - calcom_internal
+    healthcheck:
+      # No official /health endpoint; /auth/login returns 200 once the app is up.
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/auth/login',r=>process.exit(r.statusCode<400?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 150s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+volumes:
+  calcom_db_data:
+    name: donalabs_calcom_db_data
+
+networks:
+  edge:
+    external: true
+    name: ${EDGE_NETWORK:-donalabs_edge}
+  calcom_internal:
+    name: donalabs_calcom_internal

@@ -1,0 +1,10 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+# Allow-list for packages whose install/postinstall scripts pnpm otherwise blocks.
+onlyBuiltDependencies:
+  - sharp
+  - unrs-resolver
+  - "@tailwindcss/oxide"
+  - esbuild

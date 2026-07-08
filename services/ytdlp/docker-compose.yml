@@ -1,0 +1,22 @@
+# =============================================================================
+# yt-dlp — media utility (build-only; NOT a long-running service).
+# Guarded by the "tools" profile so `docker compose up` never starts it.
+#
+# Preferred interface is the safe wrapper:   ./ytdlp.sh <subcommand> <url>
+# Build the image via compose:               docker compose --profile tools build ytdlp
+# One-off run via compose (advanced):        docker compose run --rm ytdlp --version
+# =============================================================================
+
+services:
+  ytdlp:
+    build:
+      context: .
+      args:
+        YTDLP_VERSION: ${YTDLP_VERSION:-2026.7.4}
+        DENO_VERSION: ${YTDLP_DENO_VERSION:-2.9.1}
+    image: donalabs/ytdlp:${YTDLP_VERSION:-2026.7.4}
+    container_name: donalabs-ytdlp
+    profiles: ["tools"]
+    volumes:
+      - ${YTDLP_DOWNLOAD_DIR:-./downloads}:/downloads
+    # Runs on demand only (docker compose run / ./ytdlp.sh); no restart policy.

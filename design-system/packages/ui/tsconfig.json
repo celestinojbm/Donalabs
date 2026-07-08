@@ -1,0 +1,10 @@
+{
+  "extends": "@donalabs/typescript-config/react-library.json",
+  "compilerOptions": {
+    "paths": {
+      "@donalabs/ui/*": ["./src/*"]
+    }
+  },
+  "include": ["."],
+  "exclude": ["node_modules", "dist"]
+}

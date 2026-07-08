@@ -1,0 +1,49 @@
+# =============================================================================
+# Open WebUI — unified AI chat interface (Ollama / OpenAI-compatible backends)
+# Part of the DonaLabs shared infrastructure. Uses built-in SQLite (see README
+# for the Postgres upgrade path).
+# =============================================================================
+
+services:
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:${OPENWEBUI_IMAGE_TAG:-v0.10.2}
+    container_name: donalabs-open-webui
+    restart: unless-stopped
+    # Lets containers reach an Ollama installed on the Docker host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      # Stable signing key — if it changes, all sessions/encrypted data break.
+      WEBUI_SECRET_KEY: ${OPENWEBUI_SECRET_KEY}
+      # First signup becomes admin; set false afterwards to lock the instance.
+      ENABLE_SIGNUP: ${OPENWEBUI_ENABLE_SIGNUP:-true}
+      # Model providers (blank = disabled). Configure at least one to be useful.
+      OLLAMA_BASE_URL: ${OPENWEBUI_OLLAMA_BASE_URL:-}
+      OPENAI_API_BASE_URL: ${OPENWEBUI_OPENAI_API_BASE_URL:-}
+      OPENAI_API_KEY: ${OPENWEBUI_OPENAI_API_KEY:-}
+      TZ: ${TZ:-UTC}
+    volumes:
+      # All users, chats, settings, uploaded files and the vector store live here.
+      - open_webui_data:/app/backend/data
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${OPENWEBUI_HOST_PORT:-3001}:8080"
+    networks:
+      - edge
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+volumes:
+  open_webui_data:
+    name: donalabs_open_webui_data
+
+networks:
+  edge:
+    external: true
+    name: ${EDGE_NETWORK:-donalabs_edge}

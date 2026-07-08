@@ -1,0 +1,55 @@
+# =============================================================================
+# DonaLabs — Caddy reverse proxy (optional edge).
+#
+# Provides a single HTTPS entrypoint for all services. Enable with:
+#   ./scripts/proxy.sh up        (or: docker compose -f proxy/docker-compose.yml --env-file ../.env up -d)
+#
+# Prereqs: the core services are running and the donalabs_edge network exists.
+# For real HTTPS, point your DNS A/AAAA records at this host, set the CADDY_*
+# domains and CADDY_ACME_EMAIL in .env, and open ports 80/443.
+# =============================================================================
+name: donalabs-proxy
+
+services:
+  caddy:
+    image: caddy:${CADDY_IMAGE_TAG:-2-alpine}
+    container_name: donalabs-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      CADDY_ACME_EMAIL: ${CADDY_ACME_EMAIL:-}
+      CADDY_VAULTWARDEN_DOMAIN: ${CADDY_VAULTWARDEN_DOMAIN:-vault.localhost}
+      CADDY_CALCOM_DOMAIN: ${CADDY_CALCOM_DOMAIN:-cal.localhost}
+      CADDY_PLAUSIBLE_DOMAIN: ${CADDY_PLAUSIBLE_DOMAIN:-analytics.localhost}
+      CADDY_PENPOT_DOMAIN: ${CADDY_PENPOT_DOMAIN:-design.localhost}
+      CADDY_N8N_DOMAIN: ${CADDY_N8N_DOMAIN:-n8n.localhost}
+      CADDY_OPENWEBUI_DOMAIN: ${CADDY_OPENWEBUI_DOMAIN:-ai.localhost}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - edge
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+volumes:
+  caddy_data:
+    name: donalabs_caddy_data
+  caddy_config:
+    name: donalabs_caddy_config
+
+networks:
+  edge:
+    external: true
+    name: ${EDGE_NETWORK:-donalabs_edge}

@@ -1,0 +1,38 @@
+# ---- Secrets & environment ----
+# The real environment file holds generated secrets and must never be committed.
+.env
+.env.local
+*.env
+!.env.example
+secrets/
+**/secrets/
+
+# ---- Backups & data ----
+backups/*
+!backups/.gitkeep
+data/
+**/data/
+*.dump
+*.sql.gz
+*.tar.gz
+
+# ---- Caddy runtime ----
+proxy/caddy/data/
+proxy/caddy/config/
+
+# ---- yt-dlp downloads ----
+services/ytdlp/downloads/*
+!services/ytdlp/downloads/.gitkeep
+
+# ---- OS / editor cruft ----
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# ---- Logs ----
+*.log
+logs/

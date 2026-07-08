@@ -1,0 +1,3 @@
+{
+  "extends": "@donalabs/typescript-config/base.json"
+}

@@ -1,0 +1,51 @@
+# =============================================================================
+# Vaultwarden — password & secrets manager (Bitwarden-compatible server)
+# Part of the DonaLabs shared infrastructure.
+#
+# Run standalone:   docker compose --env-file ../../.env up -d
+# Run with all:     ../../start.sh   (from repo root)
+# =============================================================================
+
+services:
+  vaultwarden:
+    image: vaultwarden/server:${VW_IMAGE_TAG:-1.36.0-alpine}
+    container_name: donalabs-vaultwarden
+    restart: unless-stopped
+    environment:
+      # Exact external URL — required for attachments, passkeys/WebAuthn, Sends.
+      DOMAIN: ${VW_DOMAIN:-http://localhost:8200}
+      # Self-registration: keep open for first-run, then set false and restart.
+      SIGNUPS_ALLOWED: ${VW_SIGNUPS_ALLOWED:-true}
+      # Unlocks the /admin panel. Set (hashed or random) via .env.
+      ADMIN_TOKEN: ${VW_ADMIN_TOKEN}
+      # Live sync over the main HTTP port (port 3012 was removed in v1.31).
+      ENABLE_WEBSOCKET: "true"
+      ROCKET_PORT: "80"
+      TZ: ${TZ:-UTC}
+    volumes:
+      # Holds db.sqlite3, rsa_key.pem (JWT keys), attachments, sends, config.json.
+      - vaultwarden_data:/data
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${VW_HOST_PORT:-8200}:80"
+    networks:
+      - edge
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:80/alive || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  vaultwarden_data:
+    name: donalabs_vaultwarden_data
+
+networks:
+  edge:
+    external: true
+    name: ${EDGE_NETWORK:-donalabs_edge}

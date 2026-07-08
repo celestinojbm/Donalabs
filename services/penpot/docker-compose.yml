@@ -1,0 +1,159 @@
+# =============================================================================
+# Penpot — collaborative design & prototyping platform
+# Part of the DonaLabs shared infrastructure.
+# Stack: frontend + backend + exporter + mcp + Postgres 15 + Valkey 8.1.
+# Adapted from https://github.com/penpot/penpot (2.16.2). Only the frontend is
+# exposed; every other service stays on the private internal network.
+# =============================================================================
+
+services:
+  penpot-frontend:
+    image: penpotapp/frontend:${PENPOT_IMAGE_TAG:-2.16.2}
+    container_name: donalabs-penpot-frontend
+    restart: unless-stopped
+    depends_on:
+      - penpot-backend
+      - penpot-exporter
+      - penpot-mcp
+    volumes:
+      - penpot_assets:/opt/data/assets
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${PENPOT_HOST_PORT:-9001}:8080"
+    networks:
+      - edge
+      - penpot_internal
+    environment:
+      PENPOT_FLAGS: ${PENPOT_FLAGS:-enable-registration enable-login-with-password disable-email-verification disable-secure-session-cookies enable-prepl-server enable-mcp}
+      PENPOT_PUBLIC_URI: ${PENPOT_PUBLIC_URI:-http://localhost:9001}
+      PENPOT_HTTP_SERVER_MAX_BODY_SIZE: "367001600"
+      PENPOT_HTTP_SERVER_MAX_MULTIPART_BODY_SIZE: "367001600"
+      # Disable the frontend's IPv6 nginx listener on hosts/bridges without IPv6.
+      PENPOT_DISABLE_IPV6_LISTEN: ${PENPOT_DISABLE_IPV6_LISTEN:-true}
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  penpot-backend:
+    image: penpotapp/backend:${PENPOT_IMAGE_TAG:-2.16.2}
+    container_name: donalabs-penpot-backend
+    restart: unless-stopped
+    depends_on:
+      penpot-postgres:
+        condition: service_healthy
+      penpot-valkey:
+        condition: service_healthy
+    volumes:
+      - penpot_assets:/opt/data/assets
+    networks:
+      - penpot_internal
+    environment:
+      PENPOT_FLAGS: ${PENPOT_FLAGS:-enable-registration enable-login-with-password disable-email-verification disable-secure-session-cookies enable-prepl-server enable-mcp}
+      PENPOT_PUBLIC_URI: ${PENPOT_PUBLIC_URI:-http://localhost:9001}
+      PENPOT_SECRET_KEY: ${PENPOT_SECRET_KEY}
+      PENPOT_HTTP_SERVER_MAX_BODY_SIZE: "367001600"
+      PENPOT_HTTP_SERVER_MAX_MULTIPART_BODY_SIZE: "367001600"
+      # database
+      PENPOT_DATABASE_URI: postgresql://penpot-postgres/${PENPOT_DB_NAME:-penpot}
+      PENPOT_DATABASE_USERNAME: ${PENPOT_DB_USER:-penpot}
+      PENPOT_DATABASE_PASSWORD: ${PENPOT_DB_PASSWORD}
+      # valkey (redis-compatible) for websocket notifications
+      PENPOT_REDIS_URI: redis://penpot-valkey/0
+      # filesystem asset storage (docker volume)
+      PENPOT_OBJECTS_STORAGE_BACKEND: fs
+      PENPOT_OBJECTS_STORAGE_FS_DIRECTORY: /opt/data/assets
+      # telemetry off by default (privacy). Set true to help the Penpot project.
+      PENPOT_TELEMETRY_ENABLED: "false"
+      # SMTP — only used when 'enable-smtp' is in PENPOT_FLAGS. Blank = console/log backend.
+      PENPOT_SMTP_DEFAULT_FROM: ${PENPOT_SMTP_FROM:-no-reply@example.com}
+      PENPOT_SMTP_DEFAULT_REPLY_TO: ${PENPOT_SMTP_FROM:-no-reply@example.com}
+      PENPOT_SMTP_HOST: ${PENPOT_SMTP_HOST:-}
+      PENPOT_SMTP_PORT: ${PENPOT_SMTP_PORT:-587}
+      PENPOT_SMTP_USERNAME: ${PENPOT_SMTP_USER:-}
+      PENPOT_SMTP_PASSWORD: ${PENPOT_SMTP_PASSWORD:-}
+      PENPOT_SMTP_TLS: "true"
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  penpot-exporter:
+    image: penpotapp/exporter:${PENPOT_IMAGE_TAG:-2.16.2}
+    container_name: donalabs-penpot-exporter
+    restart: unless-stopped
+    depends_on:
+      penpot-valkey:
+        condition: service_healthy
+    networks:
+      - penpot_internal
+    environment:
+      PENPOT_SECRET_KEY: ${PENPOT_SECRET_KEY}
+      # internal address of the frontend, used by the headless renderer
+      PENPOT_PUBLIC_URI: http://penpot-frontend:8080
+      PENPOT_REDIS_URI: redis://penpot-valkey/0
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  penpot-mcp:
+    image: penpotapp/mcp:${PENPOT_IMAGE_TAG:-2.16.2}
+    container_name: donalabs-penpot-mcp
+    restart: unless-stopped
+    networks:
+      - penpot_internal
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  penpot-postgres:
+    image: postgres:15
+    container_name: donalabs-penpot-db
+    restart: unless-stopped
+    stop_signal: SIGINT
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PENPOT_DB_USER:-penpot}"]
+      interval: 5s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+    volumes:
+      - penpot_postgres_v15:/var/lib/postgresql/data
+    networks:
+      - penpot_internal
+    environment:
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+      POSTGRES_DB: ${PENPOT_DB_NAME:-penpot}
+      POSTGRES_USER: ${PENPOT_DB_USER:-penpot}
+      POSTGRES_PASSWORD: ${PENPOT_DB_PASSWORD}
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  penpot-valkey:
+    image: valkey/valkey:8.1
+    container_name: donalabs-penpot-valkey
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "valkey-cli ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    networks:
+      - penpot_internal
+    environment:
+      VALKEY_EXTRA_FLAGS: "--maxmemory 128mb --maxmemory-policy volatile-lfu"
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+volumes:
+  penpot_postgres_v15:
+    name: donalabs_penpot_postgres_v15
+  penpot_assets:
+    name: donalabs_penpot_assets
+
+networks:
+  edge:
+    external: true
+    name: ${EDGE_NETWORK:-donalabs_edge}
+  penpot_internal:
+    name: donalabs_penpot_internal

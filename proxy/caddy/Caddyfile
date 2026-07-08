@@ -1,0 +1,49 @@
+# =============================================================================
+# DonaLabs — Caddy reverse proxy
+#
+# Caddy terminates TLS (automatic HTTPS via Let's Encrypt for real domains, or a
+# local internal CA for *.localhost) and routes each hostname to the right
+# service on the shared donalabs_edge network. WebSocket upgrades (Vaultwarden,
+# n8n, Penpot) are handled transparently.
+#
+# Domains come from the root .env (CADDY_* variables).
+#
+# For production Let's Encrypt, add your email by uncommenting the global block
+# below and setting CADDY_ACME_EMAIL in .env (recommended for expiry notices):
+#
+#   {
+#       email your-email@example.com
+#   }
+# =============================================================================
+
+# --- Vaultwarden (passwords) -------------------------------------------------
+{$CADDY_VAULTWARDEN_DOMAIN} {
+	reverse_proxy vaultwarden:80
+}
+
+# --- Cal.com (scheduling) ----------------------------------------------------
+# NOTE: to serve Cal.com on a custom domain you must ALSO rebuild the Cal.com
+# image with NEXT_PUBLIC_WEBAPP_URL set to this URL (see services/calcom/README.md).
+{$CADDY_CALCOM_DOMAIN} {
+	reverse_proxy calcom:3000
+}
+
+# --- Plausible (analytics) ---------------------------------------------------
+{$CADDY_PLAUSIBLE_DOMAIN} {
+	reverse_proxy plausible:8000
+}
+
+# --- Penpot (design) ---------------------------------------------------------
+{$CADDY_PENPOT_DOMAIN} {
+	reverse_proxy penpot-frontend:8080
+}
+
+# --- n8n (automation) --------------------------------------------------------
+{$CADDY_N8N_DOMAIN} {
+	reverse_proxy n8n:5678
+}
+
+# --- Open WebUI (AI) ---------------------------------------------------------
+{$CADDY_OPENWEBUI_DOMAIN} {
+	reverse_proxy open-webui:8080
+}

@@ -1,0 +1,26 @@
+# =============================================================================
+# DonaLabs — root orchestration
+#
+# This file composes every service into a single project using Compose's
+# `include:` directive. Each service remains a self-contained stack under
+# services/<name>/ that can also be run on its own.
+#
+# Usage (preferred is the helper scripts, which also create the shared network):
+#   ../start.sh                       start everything
+#   docker compose up -d              start everything (network must exist first:
+#                                     docker network create donalabs_edge)
+#   docker compose up -d n8n          start a single service (+ its dependencies)
+#   docker compose --profile tools build ytdlp   build the yt-dlp utility image
+#
+# Values come from the root .env file (copy .env.example -> .env first).
+# =============================================================================
+name: donalabs
+
+include:
+  - path: services/vaultwarden/docker-compose.yml
+  - path: services/calcom/docker-compose.yml
+  - path: services/plausible/docker-compose.yml
+  - path: services/penpot/docker-compose.yml
+  - path: services/n8n/docker-compose.yml
+  - path: services/open-webui/docker-compose.yml
+  - path: services/ytdlp/docker-compose.yml

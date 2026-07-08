@@ -1,0 +1,13 @@
+{
+  "name": "donalabs-design-system",
+  "private": true,
+  "version": "0.1.0",
+  "engines": { "node": ">=20" },
+  "packageManager": "pnpm@10.33.0",
+  "scripts": {
+    "dev": "pnpm --filter @donalabs/showcase dev",
+    "build": "pnpm --filter @donalabs/showcase build",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck"
+  }
+}

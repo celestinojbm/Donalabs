@@ -1,0 +1,100 @@
+name: Infrastructure Validation
+
+# Validates the Docker Compose infrastructure and helper scripts WITHOUT starting
+# any service or pulling any image: `docker compose config` is a client-side parse
+# (no daemon needed), so this stays fast and hermetic.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "services/**"
+      - "proxy/**"
+      - "scripts/**"
+      - "docker-compose.yml"
+      - "*.sh"
+      - ".env.example"
+      - ".github/workflows/infra.yml"
+  pull_request:
+    paths:
+      - "services/**"
+      - "proxy/**"
+      - "scripts/**"
+      - "docker-compose.yml"
+      - "*.sh"
+      - ".env.example"
+      - ".github/workflows/infra.yml"
+
+concurrency:
+  group: infra-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: compose config · scripts · shellcheck
+    # ubuntu-latest (24.04) ships `docker compose` v2 and shellcheck preinstalled.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Show tool versions
+        run: |
+          docker compose version
+          shellcheck --version
+
+      # Produces a real .env from .env.example AND exercises generate-secrets.sh.
+      # The generated values only need to EXIST for `config` interpolation.
+      - name: Generate .env (also validates generate-secrets.sh)
+        run: ./scripts/generate-secrets.sh
+
+      - name: Validate root compose (includes every service)
+        run: docker compose config -q
+
+      - name: Validate each service compose standalone
+        run: |
+          rc=0
+          for f in services/*/docker-compose.yml; do
+            dir=$(dirname "$f"); name=$(basename "$dir")
+            if [ "$name" = "ytdlp" ]; then
+              # ytdlp's only service lives behind the "tools" profile.
+              if ( cd "$dir" && docker compose --env-file "$GITHUB_WORKSPACE/.env" --profile tools config -q ); then
+                echo "  ok   $name (tools profile)"
+              else
+                echo "  FAIL $name"; rc=1
+              fi
+            else
+              if ( cd "$dir" && docker compose --env-file "$GITHUB_WORKSPACE/.env" config -q ); then
+                echo "  ok   $name"
+              else
+                echo "  FAIL $name"; rc=1
+              fi
+            fi
+          done
+          exit $rc
+
+      - name: Validate reverse-proxy compose
+        run: docker compose -f proxy/docker-compose.yml --env-file .env config -q
+
+      - name: Verify helper scripts are executable
+        run: |
+          rc=0
+          for s in start.sh stop.sh update.sh backup.sh scripts/*.sh services/ytdlp/ytdlp.sh; do
+            if [ -x "$s" ]; then
+              echo "  ok   $s"
+            else
+              echo "  FAIL not executable: $s"; rc=1
+            fi
+          done
+          exit $rc
+
+      - name: ShellCheck
+        # Gate on warning+error; info/style notes are advisory. --external-sources
+        # follows `. lib.sh` where resolvable. Verified clean on shellcheck 0.9.0
+        # (the runner version) and 0.11.0.
+        run: |
+          shellcheck --severity=warning --external-sources \
+            start.sh stop.sh update.sh backup.sh scripts/*.sh services/ytdlp/ytdlp.sh

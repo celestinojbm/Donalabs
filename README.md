@@ -89,10 +89,12 @@ donalabs/
 │   ├── n8n/              # automation
 │   └── open-webui/       # AI interface
 │   (each has its own docker-compose.yml and README.md)
+├── design-system/        # shared UI component library + showcase app
 ├── proxy/                # optional Caddy reverse proxy (HTTPS)
 ├── scripts/             # generate-secrets, health, restore, proxy, lib, ...
 ├── backups/             # timestamped backups (git-ignored)
 ├── docs/                # architecture, consuming, security
+├── .github/workflows/    # CI: design-system.yml, infra.yml
 ├── .env.example         # the configuration contract
 ├── docker-compose.yml   # root orchestration (Compose include)
 ├── start.sh  stop.sh  update.sh  backup.sh
@@ -129,6 +131,53 @@ the restored data — **keep backups private**). Old backups beyond
 ```bash
 0 3 * * *  cd /path/to/donalabs && ./backup.sh >> backups/backup.log 2>&1
 ```
+
+---
+
+## Continuous Integration (CI)
+
+Two GitHub Actions workflows (in `.github/workflows/`) keep the repository
+stable. Both are **validation-only** — they never start a service, pull an
+image, or need secrets — so they're fast and safe to run on every change.
+
+| Workflow | File | What it checks | Runs when |
+|---|---|---|---|
+| **Design System CI** | `design-system.yml` | `pnpm install --frozen-lockfile`, then `pnpm typecheck`, `pnpm lint`, `pnpm build` for the monorepo | changes under `design-system/**` |
+| **Infrastructure Validation** | `infra.yml` | `docker compose config` for the root + every service + the proxy; every helper script is executable; ShellCheck on all scripts | changes under `services/**`, `proxy/**`, `scripts/**`, `docker-compose.yml`, `*.sh`, or `.env.example` |
+
+Each workflow only runs when files in its area change (path-filtered), and
+superseded runs on the same branch are cancelled automatically.
+
+**How infra validation stays hermetic:** `docker compose config` is a
+client-side parse — it validates and interpolates the compose files (including
+the root `include:` and the external `donalabs_edge` network) **without a
+running Docker daemon and without pulling images**. The job generates a throwaway
+`.env` with `./scripts/generate-secrets.sh` purely so interpolation has values.
+
+**Run the same checks locally before pushing:**
+
+```bash
+# Design system (from design-system/)
+pnpm install --frozen-lockfile && pnpm typecheck && pnpm lint && pnpm build
+
+# Infrastructure (from repo root)
+./scripts/generate-secrets.sh                       # create .env for interpolation
+docker compose config -q                            # root (include of all services)
+for f in services/*/docker-compose.yml; do (cd "$(dirname "$f")" && docker compose --env-file "$OLDPWD/.env" config -q); done
+docker compose -f proxy/docker-compose.yml --env-file .env config -q
+shellcheck --severity=warning --external-sources start.sh stop.sh update.sh backup.sh scripts/*.sh services/ytdlp/ytdlp.sh
+```
+
+ShellCheck gates on **warning** and **error** severity; `info`/`style` notes are
+advisory and don't fail CI. Library variables in `scripts/lib.sh` that are only
+consumed by scripts which `source` it carry an inline `# shellcheck disable=SC2034`
+so the linter can run clean at warning level.
+
+Action versions are pinned to current majors (`actions/checkout@v7`,
+`actions/setup-node@v6`, `pnpm/action-setup@v6`) which run on the Node 24 runtime;
+pnpm is pinned to `10.33.0` to match the committed lockfile. See
+[`design-system/docs/maintenance.md`](design-system/docs/maintenance.md#continuous-integration)
+for the design-system CI details and how to bump these.
 
 ---
 

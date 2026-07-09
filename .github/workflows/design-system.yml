@@ -1,0 +1,68 @@
+name: Design System CI
+
+# Typechecks, lints, and builds the design-system monorepo (apps/showcase +
+# packages/ui). Runs on any change under design-system/ (or to this workflow).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "design-system/**"
+      - ".github/workflows/design-system.yml"
+  pull_request:
+    paths:
+      - "design-system/**"
+      - ".github/workflows/design-system.yml"
+
+# One in-flight run per ref; cancel superseded runs to save minutes.
+concurrency:
+  group: design-system-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Deterministic, quiet CI output (no telemetry, no interactive Turbo TUI).
+  NEXT_TELEMETRY_DISABLED: "1"
+  TURBO_TELEMETRY_DISABLED: "1"
+  DO_NOT_TRACK: "1"
+  TURBO_UI: "false"
+
+jobs:
+  build:
+    name: typecheck · lint · build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: design-system
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # pnpm must be installed BEFORE setup-node so its pnpm store cache resolves.
+      # Pin the version explicitly (matches packageManager: pnpm@10.33.0); do NOT
+      # let it float to pnpm 11, which rejects a lockfile written by pnpm 10.
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10.33.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22" # Next.js 16 requires Node >= 20.9; 22 is current LTS
+          cache: pnpm
+          cache-dependency-path: design-system/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Build
+        run: pnpm build

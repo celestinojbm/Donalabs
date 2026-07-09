@@ -82,6 +82,43 @@ scripts: `<package>`", and that package is a build-time necessity (a native
 binary, a codegen step), add it to that list and re-run install — don't run
 `pnpm approve-builds` interactively in CI.
 
+## Continuous integration
+
+The **Design System CI** workflow (`.github/workflows/design-system.yml` at the
+repo root) runs on every change under `design-system/**`:
+
+```
+pnpm install --frozen-lockfile   # in design-system/, fails on a stale lockfile
+pnpm typecheck                    # tsc --noEmit across all packages (via turbo)
+pnpm lint                         # eslint across all packages
+pnpm build                        # next build (all showcase routes → static)
+```
+
+Notes and the reasons behind the pins:
+
+- **Runner order matters:** `pnpm/action-setup` runs **before** `actions/setup-node`
+  so that `setup-node`'s pnpm store cache can resolve pnpm on `PATH`.
+- **pnpm is pinned to `10.33.0`** (the action's `version:` input) to match the
+  committed lockfile. Do **not** let it float to pnpm 11 — pnpm 11 refuses a
+  lockfile written by pnpm 10 and the job fails. When you intentionally bump pnpm,
+  update the `packageManager` field, the lockfile, and the workflow's `version:`
+  together.
+- **`cache-dependency-path: design-system/pnpm-lock.yaml`** is required because the
+  lockfile is not at the repo root.
+- **Node 22** (`>= 20.9` is the Next.js 16 minimum). Actions are pinned to current
+  majors on the Node 24 runtime (`checkout@v7`, `setup-node@v6`, `action-setup@v6`)
+  to avoid the Node-20-runtime deprecation.
+- **The build needs outbound HTTPS** to `fonts.googleapis.com` / `fonts.gstatic.com`
+  because `next/font/google` (Geist) fetches and self-hosts the font at build time.
+  GitHub-hosted runners have this; a locked-down/self-hosted runner would need those
+  hosts allow-listed, or the fonts switched to `next/font/local` with committed
+  `woff2` files.
+- **Telemetry/TTY** are silenced via job env (`NEXT_TELEMETRY_DISABLED`,
+  `TURBO_TELEMETRY_DISABLED`, `DO_NOT_TRACK`, `TURBO_UI=false`).
+
+Infrastructure (compose/scripts) is validated by a separate `infra.yml` workflow —
+see the "Continuous Integration (CI)" section in the root `README.md`.
+
 ## Extracting `packages/ui` into a different repository
 
 The design system is meant to be reused beyond this monorepo. To lift it

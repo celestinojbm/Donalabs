@@ -68,7 +68,8 @@ ensure_network() {
 dc() { ( cd "$DONALABS_ROOT" && docker compose "$@" ); }
 
 # --- service metadata --------------------------------------------------------
-# Postgres databases as "container:user_var:db_var"
+# Postgres databases as "container:user_var:db_var".
+# shellcheck disable=SC2034  # consumed by backup.sh / restore.sh which source this file
 PG_DATABASES=(
   "donalabs-calcom-db:CALCOM_DB_USER:CALCOM_DB_NAME"
   "donalabs-plausible-db:PLAUSIBLE_DB_USER:PLAUSIBLE_DB_NAME"
@@ -77,6 +78,7 @@ PG_DATABASES=(
 )
 
 # Named data volumes to snapshot (Postgres data is captured via pg_dump instead).
+# shellcheck disable=SC2034  # consumed by backup.sh / restore.sh which source this file
 DATA_VOLUMES=(
   "donalabs_vaultwarden_data"
   "donalabs_open_webui_data"

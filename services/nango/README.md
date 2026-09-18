@@ -18,6 +18,8 @@ Dona should primarily use Nango for actions and connected-account access. Nova C
 ./start.sh nango-server
 ```
 
+Nango is in the Compose `agents` profile, so the default DonaLabs stack stays lightweight. Explicitly targeting `nango-server` activates it and its dependencies.
+
 The first deployment should be validated locally before configuring external OAuth callback URLs.
 
 ## OAuth callback URLs

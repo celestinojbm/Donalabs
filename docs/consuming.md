@@ -33,6 +33,9 @@ port (not the host-published port):
 | Open WebUI | `http://open-webui:8080` | OpenAI-compatible API `/api` (Bearer key) |
 | Firecrawl | `http://firecrawl-api:3002` | Web search, scrape and crawl API |
 | Nango | `http://nango-server:3003` | OAuth/API integration control plane |
+| SearXNG | `http://searxng:8080` | Search UI + JSON `/search` API |
+| MinIO | `http://minio:9000` | S3-compatible object API |
+| Langfuse | `http://langfuse-web:3000` | Trace/evaluation ingestion and dashboard API |
 
 > An external client (browser, mobile app, another host) reaches services through
 > the published host port or, preferably, the Caddy reverse proxy over HTTPS.
@@ -65,6 +68,32 @@ Nango centralizes provider authentication and token lifecycle. Start it explicit
 Consumers on `donalabs_edge` use `http://nango-server:3003`. Product code
 should never query Nango's Postgres directly. Use the Nango API/SDK and keep
 workspace/user authorization decisions in the consuming product or Tool Gateway.
+
+---
+
+## SearXNG — shared metasearch
+
+SearXNG provides the self-hosted search layer used by Firecrawl and agents. JSON results are available at:
+
+```text
+http://searxng:8080/search?q=<query>&format=json
+```
+
+Firecrawl is preconfigured to use this internal endpoint.
+
+---
+
+## MinIO — shared object storage
+
+MinIO exposes S3-compatible storage at `http://minio:9000`. Initial buckets are `langfuse`, `nova-context`, and `agent-artifacts`.
+
+Product code should use scoped access credentials rather than the root account once a product becomes multi-user or externally exposed.
+
+---
+
+## Langfuse — agent observability
+
+Send Dona, Nova Context and Hermes traces to `http://langfuse-web:3000` using separate Langfuse projects/keys. Use trace metadata for workspace/product/agent IDs so costs and failures remain attributable.
 
 ---
 

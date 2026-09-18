@@ -1,0 +1,160 @@
+# =============================================================================
+# Firecrawl — self-hosted web data API for DonaLabs agents.
+#
+# Uses upstream public images. The API is the only component on donalabs_edge;
+# Redis/RabbitMQ/Postgres/Playwright stay on a private network.
+#
+# Start only this stack from repo root:
+#   ./start.sh firecrawl-api
+# =============================================================================
+
+services:
+  firecrawl-api:
+    image: ghcr.io/firecrawl/firecrawl:${FIRECRAWL_IMAGE_TAG:-2.11.334}
+    container_name: donalabs-firecrawl-api
+    restart: unless-stopped
+    command: node dist/src/harness.js --start-docker
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3002
+      USE_DB_AUTHENTICATION: "false"
+      REDIS_URL: redis://firecrawl-redis:6379
+      REDIS_RATE_LIMIT_URL: redis://firecrawl-redis:6379
+      PLAYWRIGHT_MICROSERVICE_URL: http://firecrawl-playwright:3000/scrape
+      POSTGRES_USER: ${FIRECRAWL_PG_USER:-firecrawl}
+      POSTGRES_PASSWORD: ${FIRECRAWL_PG_PASSWORD}
+      POSTGRES_DB: ${FIRECRAWL_PG_DB:-firecrawl}
+      POSTGRES_HOST: firecrawl-postgres
+      POSTGRES_PORT: 5432
+      NUQ_RABBITMQ_URL: amqp://firecrawl-rabbitmq:5672
+      NUM_WORKERS_PER_QUEUE: ${FIRECRAWL_NUM_WORKERS:-4}
+      CRAWL_CONCURRENT_REQUESTS: ${FIRECRAWL_CRAWL_CONCURRENCY:-5}
+      MAX_CONCURRENT_JOBS: ${FIRECRAWL_MAX_JOBS:-3}
+      BROWSER_POOL_SIZE: ${FIRECRAWL_BROWSER_POOL_SIZE:-3}
+      BULL_AUTH_KEY: ${FIRECRAWL_BULL_AUTH_KEY}
+      LOGGING_LEVEL: ${FIRECRAWL_LOG_LEVEL:-info}
+      OLLAMA_BASE_URL: ${FIRECRAWL_OLLAMA_BASE_URL:-}
+      OPENAI_BASE_URL: ${FIRECRAWL_OPENAI_BASE_URL:-}
+      OPENAI_API_KEY: ${FIRECRAWL_OPENAI_API_KEY:-}
+      MODEL_NAME: ${FIRECRAWL_MODEL_NAME:-}
+      MODEL_EMBEDDING_NAME: ${FIRECRAWL_EMBEDDING_MODEL_NAME:-}
+      SEARXNG_ENDPOINT: ${FIRECRAWL_SEARXNG_ENDPOINT:-}
+      PROXY_SERVER: ${FIRECRAWL_PROXY_SERVER:-}
+      PROXY_USERNAME: ${FIRECRAWL_PROXY_USERNAME:-}
+      PROXY_PASSWORD: ${FIRECRAWL_PROXY_PASSWORD:-}
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${FIRECRAWL_HOST_PORT:-3002}:3002"
+    depends_on:
+      firecrawl-postgres:
+        condition: service_healthy
+      firecrawl-rabbitmq:
+        condition: service_healthy
+      firecrawl-redis:
+        condition: service_started
+      firecrawl-playwright:
+        condition: service_started
+    networks:
+      - firecrawl_internal
+      - donalabs_edge
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  firecrawl-playwright:
+    image: ghcr.io/firecrawl/playwright-service:${FIRECRAWL_PLAYWRIGHT_TAG:-latest}
+    container_name: donalabs-firecrawl-playwright
+    restart: unless-stopped
+    environment:
+      PORT: 3000
+      MAX_CONCURRENT_PAGES: ${FIRECRAWL_CRAWL_CONCURRENCY:-5}
+      PROXY_SERVER: ${FIRECRAWL_PROXY_SERVER:-}
+      PROXY_USERNAME: ${FIRECRAWL_PROXY_USERNAME:-}
+      PROXY_PASSWORD: ${FIRECRAWL_PROXY_PASSWORD:-}
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - firecrawl_internal
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  firecrawl-redis:
+    image: redis:7-alpine
+    container_name: donalabs-firecrawl-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --bind 0.0.0.0
+    volumes:
+      - firecrawl_redis_data:/data
+    networks:
+      - firecrawl_internal
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  firecrawl-rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: donalabs-firecrawl-rabbitmq
+    restart: unless-stopped
+    volumes:
+      - firecrawl_rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - firecrawl_internal
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  firecrawl-postgres:
+    image: ghcr.io/firecrawl/nuq-postgres:${FIRECRAWL_NUQ_POSTGRES_TAG:-latest}
+    container_name: donalabs-firecrawl-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${FIRECRAWL_PG_USER:-firecrawl}
+      POSTGRES_PASSWORD: ${FIRECRAWL_PG_PASSWORD}
+      POSTGRES_DB: ${FIRECRAWL_PG_DB:-firecrawl}
+    volumes:
+      - firecrawl_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${FIRECRAWL_PG_USER:-firecrawl} -d ${FIRECRAWL_PG_DB:-firecrawl}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - firecrawl_internal
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  donalabs_edge:
+    external: true
+    name: ${EDGE_NETWORK:-donalabs_edge}
+  firecrawl_internal:
+    name: donalabs_firecrawl_internal
+    internal: true
+
+volumes:
+  firecrawl_postgres_data:
+    name: donalabs_firecrawl_postgres_data
+  firecrawl_redis_data:
+    name: donalabs_firecrawl_redis_data
+  firecrawl_rabbitmq_data:
+    name: donalabs_firecrawl_rabbitmq_data

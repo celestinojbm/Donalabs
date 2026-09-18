@@ -101,7 +101,5 @@ plausible|http://127.0.0.1:${PLAUSIBLE_HOST_PORT:-8210}/api/health
 penpot|http://127.0.0.1:${PENPOT_HOST_PORT:-9001}/readyz
 n8n|http://127.0.0.1:${N8N_HOST_PORT:-5678}/healthz
 open-webui|http://127.0.0.1:${OPENWEBUI_HOST_PORT:-3001}/health
-firecrawl|http://127.0.0.1:${FIRECRAWL_HOST_PORT:-3002}/v0/health/liveness
-nango|http://127.0.0.1:${NANGO_HOST_PORT:-3003}/
 EOF
 }

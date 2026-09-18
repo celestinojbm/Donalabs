@@ -39,7 +39,11 @@ cat <<EOF
   Firecrawl   (optional)    http://localhost:${FIRECRAWL_HOST_PORT:-3002}
   Nango       (optional)     http://localhost:${NANGO_HOST_PORT:-3003}
   Nango Connect UI           http://localhost:${NANGO_CONNECT_UI_PORT:-3009}
-  Agent services: ./start.sh firecrawl-api nango-server
+  SearXNG     (optional)    http://localhost:${SEARXNG_HOST_PORT:-8088}
+  MinIO API   (optional)    http://localhost:${MINIO_API_HOST_PORT:-9000}
+  MinIO UI    (optional)    http://localhost:${MINIO_CONSOLE_HOST_PORT:-9001}
+  Langfuse    (optional)    http://localhost:${LANGFUSE_HOST_PORT:-3010}
+  Agent stack: ./start.sh firecrawl-api nango-server searxng minio minio-init langfuse-web langfuse-worker
 
   Health check:  ./scripts/health.sh
   yt-dlp:        ./services/ytdlp/ytdlp.sh help

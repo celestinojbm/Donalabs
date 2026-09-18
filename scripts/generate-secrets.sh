@@ -46,6 +46,11 @@ declare -A SECRETS=(
   [N8N_ENCRYPTION_KEY]="gen_hex 32"
   [N8N_DB_PASSWORD]="gen_hex 24"
   [OPENWEBUI_SECRET_KEY]="gen_hex 32"
+  [FIRECRAWL_PG_PASSWORD]="gen_hex 24"
+  [FIRECRAWL_BULL_AUTH_KEY]="gen_hex 32"
+  [NANGO_ENCRYPTION_KEY]="gen_b64 32"
+  [NANGO_DB_PASSWORD]="gen_hex 24"
+  [NANGO_DASHBOARD_PASSWORD]="gen_hex 24"
 )
 
 # Vars whose value must be single-quoted in the .env file (may contain '$').

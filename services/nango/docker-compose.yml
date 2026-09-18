@@ -8,6 +8,7 @@
 
 services:
   nango-server:
+    profiles: ["agents"]
     image: nangohq/nango-server:${NANGO_IMAGE_TAG:-hosted}
     container_name: donalabs-nango
     platform: linux/amd64
@@ -36,8 +37,10 @@ services:
       - "${BIND_ADDR:-127.0.0.1}:${NANGO_CONNECT_UI_PORT:-3009}:3009"
     depends_on:
       nango-db:
+    profiles: ["agents"]
         condition: service_healthy
       nango-redis:
+    profiles: ["agents"]
         condition: service_started
     networks:
       - nango_internal

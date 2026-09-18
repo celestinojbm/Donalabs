@@ -1,6 +1,6 @@
 # DonaLabs
 
-**Personal AI infrastructure & shared services platform.**
+**Shared AI infrastructure, integrations & agent services platform.**
 
 DonaLabs is not a product. It is a reusable, self-hosted platform that provides
 shared services — password management, scheduling, analytics, design, automation,
@@ -21,6 +21,8 @@ health-checked, backed up, and ready to be consumed by other projects.
 | **n8n** | Workflow automation | http://localhost:5678 | `http://n8n:5678` |
 | **Open WebUI** | Unified AI chat interface | http://localhost:3001 | `http://open-webui:8080` |
 | **yt-dlp** | Media utility (CLI, on demand) | — (`./services/ytdlp/ytdlp.sh`) | — |
+| **Firecrawl** | Web search, scraping & crawling for agents | http://localhost:3002 | `http://firecrawl-api:3002` |
+| **Nango** | OAuth/API integrations for products & agents | http://localhost:3003 | `http://nango-server:3003` |
 
 Each service has its own detailed guide under [`services/<name>/README.md`](services/).
 
@@ -74,6 +76,8 @@ disk to run the full stack, plus `openssl` and `bash` for the scripts.
 
 Full rationale and trade-offs: [`docs/architecture.md`](docs/architecture.md).
 
+Agent-facing service boundaries and the Tool Gateway direction are documented in [`docs/agent-platform.md`](docs/agent-platform.md).
+
 ---
 
 ## Repository structure
@@ -87,7 +91,9 @@ donalabs/
 │   ├── penpot/           # design
 │   ├── ytdlp/            # media utility (Dockerfile + safe wrapper)
 │   ├── n8n/              # automation
-│   └── open-webui/       # AI interface
+│   ├── open-webui/       # AI interface
+│   ├── firecrawl/        # web data API for agents
+│   └── nango/            # OAuth/API integration layer
 │   (each has its own docker-compose.yml and README.md)
 ├── proxy/                # optional Caddy reverse proxy (HTTPS)
 ├── scripts/             # generate-secrets, health, restore, proxy, lib, ...

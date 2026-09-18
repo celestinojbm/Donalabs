@@ -31,9 +31,40 @@ port (not the host-published port):
 | Penpot | `http://penpot-frontend:8080` | Web app + MCP server; exporter for PDF/PNG/SVG |
 | n8n | `http://n8n:5678` | REST API `/api/v1`, webhooks `/webhook/<path>` |
 | Open WebUI | `http://open-webui:8080` | OpenAI-compatible API `/api` (Bearer key) |
+| Firecrawl | `http://firecrawl-api:3002` | Web search, scrape and crawl API |
+| Nango | `http://nango-server:3003` | OAuth/API integration control plane |
 
 > An external client (browser, mobile app, another host) reaches services through
 > the published host port or, preferably, the Caddy reverse proxy over HTTPS.
+
+---
+
+## Firecrawl — web data for agents
+
+Firecrawl is optional agent infrastructure. Start it explicitly:
+
+```bash
+./start.sh firecrawl-api
+```
+
+Consumers on `donalabs_edge` call `http://firecrawl-api:3002`. The self-hosted
+instance is intentionally unauthenticated inside the trusted Docker network, so
+do not expose it directly to untrusted clients. A product-facing deployment
+should call it through a DonaLabs adapter/Tool Gateway.
+
+---
+
+## Nango — connected apps and OAuth
+
+Nango centralizes provider authentication and token lifecycle. Start it explicitly:
+
+```bash
+./start.sh nango-server
+```
+
+Consumers on `donalabs_edge` use `http://nango-server:3003`. Product code
+should never query Nango's Postgres directly. Use the Nango API/SDK and keep
+workspace/user authorization decisions in the consuming product or Tool Gateway.
 
 ---
 

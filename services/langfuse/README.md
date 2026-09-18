@@ -16,6 +16,8 @@ It is meant to answer questions that Plausible cannot: which model/tool call hap
 
 Langfuse uses its own Postgres, Redis and ClickHouse. It reuses the shared DonaLabs MinIO bucket `langfuse` for event/media/export objects.
 
+MinIO is intentionally not declared as a Compose dependency inside the Langfuse service file so the service stack remains standalone-valid under DonaLabs CI. Start MinIO first (or in the same root command shown above).
+
 ## Product integration
 
 Dona, Nova Context and Hermes should create their own Langfuse projects/keys but send traces to the same platform. Keep product identity/workspace identifiers in trace metadata so cross-product analysis remains possible without collapsing tenancy.

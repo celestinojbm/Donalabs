@@ -6,7 +6,7 @@
 services:
   searxng:
     profiles: ["agents"]
-    image: docker.io/searxng/searxng:${SEARXNG_IMAGE_TAG:-latest}
+    image: ghcr.io/searxng/searxng:${SEARXNG_IMAGE_TAG:-2026.9.17-274b63b67}
     container_name: donalabs-searxng
     restart: unless-stopped
     environment:

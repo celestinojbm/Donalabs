@@ -20,7 +20,7 @@ From the repository root:
 curl http://127.0.0.1:3002/v0/health/liveness
 ```
 
-Starting `firecrawl-api` pulls in its dependencies automatically.
+Firecrawl is in the Compose `agents` profile, so a normal `./start.sh` does not consume its RAM/CPU. Explicitly targeting `firecrawl-api` activates it and its dependencies.
 
 ## Security boundary
 

@@ -1,0 +1,16 @@
+use_default_settings: true
+
+server:
+  secret_key: "ultrasecretkey"
+  limiter: true
+  image_proxy: true
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  formats:
+    - html
+    - json
+
+valkey:
+  url: valkey://searxng-valkey:6379/0

@@ -24,3 +24,8 @@ include:
   - path: services/n8n/docker-compose.yml
   - path: services/open-webui/docker-compose.yml
   - path: services/ytdlp/docker-compose.yml
+  - path: services/firecrawl/docker-compose.yml
+  - path: services/nango/docker-compose.yml
+  - path: services/searxng/docker-compose.yml
+  - path: services/minio/docker-compose.yml
+  - path: services/langfuse/docker-compose.yml

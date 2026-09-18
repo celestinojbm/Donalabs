@@ -52,7 +52,7 @@ done
 
 # --- 2. Named data volume snapshots -----------------------------------------
 # app containers that write to the volumes we tar (for --consistent mode)
-STOP_FOR_CONSISTENCY=(donalabs-vaultwarden donalabs-open-webui donalabs-n8n donalabs-plausible donalabs-penpot-backend)
+STOP_FOR_CONSISTENCY=(donalabs-vaultwarden donalabs-open-webui donalabs-n8n donalabs-plausible donalabs-penpot-backend donalabs-langfuse-web donalabs-langfuse-worker donalabs-minio)
 if [ "$CONSISTENT" -eq 1 ]; then
   info "consistent mode: stopping app containers during snapshot..."
   for c in "${STOP_FOR_CONSISTENCY[@]}"; do docker stop "$c" >/dev/null 2>&1 || true; done

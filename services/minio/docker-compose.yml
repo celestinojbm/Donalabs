@@ -1,0 +1,63 @@
+# =============================================================================
+# MinIO — shared S3-compatible object storage for DonaLabs.
+# Used by Langfuse now and available to Nova Context / agent artifacts later.
+# =============================================================================
+
+services:
+  minio:
+    profiles: ["agents"]
+    image: quay.io/minio/minio:${MINIO_IMAGE_TAG:-RELEASE.2025-09-06T17-38-46Z}
+    container_name: donalabs-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${MINIO_API_HOST_PORT:-9000}:9000"
+      - "${BIND_ADDR:-127.0.0.1}:${MINIO_CONSOLE_HOST_PORT:-9001}:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    networks:
+      - donalabs_edge
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  minio-init:
+    profiles: ["agents"]
+    image: quay.io/minio/minio:${MINIO_IMAGE_TAG:-RELEASE.2025-09-06T17-38-46Z}
+    container_name: donalabs-minio-init
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        mc alias set donalabs http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" &&
+        mc mb --ignore-existing donalabs/langfuse &&
+        mc mb --ignore-existing donalabs/nova-context &&
+        mc mb --ignore-existing donalabs/agent-artifacts
+    networks:
+      - donalabs_edge
+
+networks:
+  donalabs_edge:
+    external: true
+    name: ${EDGE_NETWORK:-donalabs_edge}
+
+volumes:
+  minio_data:
+    name: donalabs_minio_data

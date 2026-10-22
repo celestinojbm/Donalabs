@@ -110,8 +110,8 @@ export default function HomePage() {
                 Si quieres enganchar un proyecto, escríbeme.
               </h2>
               <p className="text-sm leading-relaxed text-muted-foreground">
-                Deja un correo. El formulario todavía no tiene un buzón: el
-                envío queda pendiente y no sale de aquí.
+                Deja tu correo. Si la hoja está conectada, lo anoto. Desde aquí
+                no te mando ningún mensaje.
               </p>
             </div>
             <ContactForm />

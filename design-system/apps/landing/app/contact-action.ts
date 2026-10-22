@@ -1,20 +1,26 @@
 "use server"
 
-export type ContactState = { status: "invalid" } | { status: "pending" } | null
+import { deliverContact, type ContactState } from "@/lib/contact-submit"
 
-const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+function textField(formData: FormData, name: string) {
+  const value = formData.get(name)
+  if (value == null) return ""
+  if (typeof value !== "string") return null
+  return value
+}
 
 export async function submitContact(
-  _previous: ContactState,
+  _previous: ContactState | null,
   formData: FormData
 ): Promise<ContactState> {
-  const email = String(formData.get("email") ?? "").trim()
-
-  if (email.length > 254 || !EMAIL.test(email)) {
-    return { status: "invalid" }
+  const email = textField(formData, "email")
+  const fax = textField(formData, "fax")
+  if (email == null || fax == null) {
+    return { status: "too-large" }
   }
 
-  // PENDING: no mail endpoint is configured.
-  // Do not forward, store, or log the address.
-  return { status: "pending" }
+  return deliverContact(
+    { email, fax },
+    { webhookUrl: process.env.LANDING_SHEETS_WEBHOOK_URL }
+  )
 }

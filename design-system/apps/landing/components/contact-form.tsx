@@ -21,19 +21,39 @@ import {
   InputGroupInput,
 } from "@donalabs/ui/components/input-group"
 
-import { submitContact, type ContactState } from "@/app/contact-action"
+import { submitContact } from "@/app/contact-action"
+import type { ContactState } from "@/lib/contact-submit"
+
+const FIELD_ERROR: Partial<Record<ContactState["status"], string>> = {
+  invalid: "Ese correo no tiene forma de correo.",
+  "too-large": "Ese envío es demasiado largo.",
+}
 
 export function ContactForm() {
-  const [state, action, pending] = useActionState<ContactState, FormData>(
-    submitContact,
-    null
-  )
-  const invalid = state?.status === "invalid"
+  const [state, action, pending] = useActionState<
+    ContactState | null,
+    FormData
+  >(submitContact, null)
+  const fieldError = state ? FIELD_ERROR[state.status] : undefined
 
   return (
-    <form action={action} className="max-w-md" noValidate>
+    <form action={action} className="relative max-w-md" noValidate>
+      <div
+        aria-hidden="true"
+        className="absolute -left-[10000px] h-px w-px overflow-hidden"
+      >
+        <label htmlFor="fax">Fax</label>
+        <input
+          id="fax"
+          name="fax"
+          type="text"
+          tabIndex={-1}
+          autoComplete="off"
+          defaultValue=""
+        />
+      </div>
       <FieldGroup>
-        <Field data-invalid={invalid || undefined}>
+        <Field data-invalid={fieldError ? true : undefined}>
           <FieldLabel htmlFor="email">Correo</FieldLabel>
           <InputGroup>
             <InputGroupInput
@@ -43,8 +63,9 @@ export function ContactForm() {
               inputMode="email"
               autoComplete="email"
               placeholder="tu@correo.com"
-              aria-invalid={invalid || undefined}
+              aria-invalid={fieldError ? true : undefined}
               required
+              maxLength={254}
             />
             <InputGroupAddon align="inline-end">
               <InputGroupButton
@@ -58,20 +79,31 @@ export function ContactForm() {
             </InputGroupAddon>
           </InputGroup>
           <FieldDescription>
-            El envío todavía no tiene destino. Si lo pulsas, el correo se queda
-            en esta página.
+            Se anotan el correo, la fecha y el origen. No te escribo de vuelta.
           </FieldDescription>
-          {invalid ? (
-            <FieldError>Ese correo no tiene forma de correo.</FieldError>
-          ) : null}
+          {fieldError ? <FieldError>{fieldError}</FieldError> : null}
         </Field>
-        {state?.status === "pending" ? (
+        {state?.status === "unconfigured" ? (
           <Alert>
-            <AlertTitle>No se ha enviado</AlertTitle>
+            <AlertTitle>No está configurado</AlertTitle>
             <AlertDescription>
-              Todavía no hay un buzón conectado. Tu correo no ha salido de esta
+              El envío no está configurado. Tu correo no ha salido de esta
               página.
             </AlertDescription>
+          </Alert>
+        ) : null}
+        {state?.status === "failed" ? (
+          <Alert variant="destructive">
+            <AlertTitle>No se ha anotado</AlertTitle>
+            <AlertDescription>
+              No he podido guardarlo. Prueba otra vez dentro de un momento.
+            </AlertDescription>
+          </Alert>
+        ) : null}
+        {state?.status === "ok" ? (
+          <Alert>
+            <AlertTitle>Anotado</AlertTitle>
+            <AlertDescription>Listo. Tu correo quedó anotado.</AlertDescription>
           </Alert>
         ) : null}
       </FieldGroup>

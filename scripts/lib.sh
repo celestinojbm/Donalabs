@@ -19,6 +19,7 @@ info()  { printf "${C_BLUE}▸ %s${C_RESET}\n" "$*"; }
 ok()    { printf "${C_GREEN}✓ %s${C_RESET}\n" "$*"; }
 warn()  { printf "${C_YELLOW}! %s${C_RESET}\n" "$*"; }
 err()   { printf "${C_RED}✗ %s${C_RESET}\n" "$*" >&2; }
+die()   { err "$*"; exit 1; }
 
 # --- preconditions -----------------------------------------------------------
 require_docker() {

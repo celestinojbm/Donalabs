@@ -1,0 +1,7 @@
+[
+  {"id": "t1", "task": "Cada lunes a las 8:00 exporta las métricas de Plausible a una hoja de cálculo."},
+  {"id": "t2", "task": "¿Qué decidimos en la reunión de septiembre sobre la OptiPlex?"},
+  {"id": "t3", "task": "Redacta un correo a los beta testers avisando del mantenimiento del sábado."},
+  {"id": "t4", "task": "Escríbeme un resumen de una página del roadmap de Donalabs."},
+  {"id": "t5", "task": "Cuando llegue un webhook de Cal.com con una reserva nueva, crea una tarea en Notion."}
+]

@@ -31,12 +31,16 @@ touches_openwebui() {
   return 1
 }
 fresh_openwebui_backup() {
-  # prints the newest backup dir with an Open WebUI volume newer than the max age
-  local m
-  m="$(find "${DONALABS_ROOT}/backups" -mindepth 2 -maxdepth 2 -name MANIFEST.txt \
-        -mmin "-${OWUI_MAX_AGE_MIN}" 2>/dev/null | xargs -r grep -l "vol  ${OWUI_VOL} " 2>/dev/null \
-        | xargs -r ls -1t 2>/dev/null | head -n1)"
-  [ -n "$m" ] && [ -s "$(dirname "$m")/${OWUI_VOL}_vol.tar.gz" ] && dirname "$m"
+  # prints the newest backup dir (names are sortable UTC stamps) that contains a
+  # non-empty Open WebUI volume tarball and whose MANIFEST is newer than the max age
+  local d
+  while IFS= read -r d; do
+    [ -n "$(find "${d}MANIFEST.txt" -mmin "-${OWUI_MAX_AGE_MIN}" 2>/dev/null)" ] || continue
+    grep -q "^vol  ${OWUI_VOL} " "${d}MANIFEST.txt" || continue
+    [ -s "${d}${OWUI_VOL}_vol.tar.gz" ] || continue
+    printf '%s\n' "${d%/}"; return 0
+  done < <(ls -1dr "${DONALABS_ROOT}/backups"/*/ 2>/dev/null)
+  return 1
 }
 OWUI=0
 if touches_openwebui "$@"; then

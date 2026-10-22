@@ -24,3 +24,4 @@ include:
   - path: services/n8n/docker-compose.yml
   - path: services/open-webui/docker-compose.yml
   - path: services/ytdlp/docker-compose.yml
+  - path: services/task-router/docker-compose.yml   # optional: --profile router

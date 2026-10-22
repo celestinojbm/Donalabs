@@ -1,0 +1,6 @@
+[
+  {"name": "Dona", "description": "Asistente principal de cara al usuario: conversación, redacción, resúmenes y decisiones de producto."},
+  {"name": "nova-context", "description": "Memoria y contexto: buscar en notas, documentos y conversaciones previas; recuperar información histórica."},
+  {"name": "Hermes", "description": "Mensajería y comunicaciones: preparar o enviar correos, mensajes y notificaciones a terceros."},
+  {"name": "n8n", "description": "Automatización determinista: flujos programados, integraciones entre APIs, webhooks, ETL y tareas repetitivas."}
+]

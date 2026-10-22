@@ -158,3 +158,27 @@ curl -fsS http://localhost:3001/health   # -> 200 {"status":true}
 - **Other services get connection errors:** they're likely using `localhost:3001`. Internal callers must use `http://open-webui:8080` and be attached to `donalabs_edge`.
 - **Lost data after `docker compose down -v` or a fresh volume:** state lives only in `donalabs_open_webui_data`. Restore from your tar backup; never use `-v` on this stack unless you intend to wipe it.
 - **Slow / locked under concurrent load:** the default SQLite backend is single-writer. Point the container at Postgres by adding `DATABASE_URL=postgresql://user:pass@host:5432/openwebui` to the service environment (not wired into `.env` by default) and restart.
+
+## Actualización segura y rollback (obligatorio)
+
+Open WebUI puede migrar su base de datos al actualizar (p. ej. **0.12.3**, 17-oct-2026, cambia el esquema y pide respaldo). Una migración no se deshace bajando la versión de la imagen: el único rollback es restaurar el volumen.
+
+Reglas:
+- `OPENWEBUI_IMAGE_TAG` siempre es una versión explícita (`vX.Y.Z`). El compose falla si está vacía y `update.sh` rechaza `latest`, `main`, etc.
+- `./update.sh` (todo) o `./update.sh open-webui` **se niega a continuar** si no hay en `backups/` un respaldo del volumen `donalabs_open_webui_data` de menos de `OPENWEBUI_BACKUP_MAX_AGE_MIN` minutos (60 por defecto). `--no-backup` no se salta esta verificación.
+
+Procedimiento:
+1. Lee las notas de la versión destino.
+2. `./backup.sh --consistent` (detiene Open WebUI durante la copia, para que SQLite quede consistente).
+3. Sube `OPENWEBUI_IMAGE_TAG` en `.env` y ejecuta `./update.sh open-webui`.
+4. Verifica con `./scripts/health.sh` y entra a la UI.
+
+Rollback (si la versión nueva falla o la migración rompe datos):
+1. Vuelve a poner en `.env` el `OPENWEBUI_IMAGE_TAG` anterior (está en `backups/<stamp>/env.backup`).
+2. `docker stop donalabs-open-webui`
+3. Restaura el volumen: `./scripts/restore.sh backups/<stamp>` o a mano:
+   ```bash
+   docker run --rm -v donalabs_open_webui_data:/data -v "$PWD/backups/<stamp>":/b alpine:3.21 \
+     sh -c 'rm -rf /data/* /data/.[!.]* 2>/dev/null; tar xzf /b/donalabs_open_webui_data_vol.tar.gz -C /data'
+   ```
+4. `docker compose -f services/open-webui/docker-compose.yml up -d` y verifica.

@@ -6,7 +6,7 @@
 
 services:
   open-webui:
-    image: ghcr.io/open-webui/open-webui:${OPENWEBUI_IMAGE_TAG:-v0.10.2}
+    image: ghcr.io/open-webui/open-webui:${OPENWEBUI_IMAGE_TAG:?set OPENWEBUI_IMAGE_TAG to an explicit version (e.g. v0.10.2)}
     container_name: donalabs-open-webui
     restart: unless-stopped
     # Lets containers reach an Ollama installed on the Docker host.

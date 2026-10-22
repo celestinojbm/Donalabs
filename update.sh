@@ -4,7 +4,8 @@
 #
 #   ./update.sh                update everything (backup first, then pull + recreate)
 #   ./update.sh n8n            update only the named service(s)
-#   ./update.sh --no-backup    skip the pre-update backup
+#   ./update.sh --no-backup    skip the pre-update backup (Open WebUI still
+#                              requires a backup < OPENWEBUI_BACKUP_MAX_AGE_MIN)
 #
 # To upgrade a service, bump its *_IMAGE_TAG in .env, then run this script.
 # Always review each project's release notes before a major version bump.
@@ -13,15 +14,55 @@ set -euo pipefail
 . "$(dirname "$0")/scripts/lib.sh"
 
 require_docker
-require_env
+load_env
 ensure_network
 
 DO_BACKUP=1
 if [ "${1:-}" = "--no-backup" ]; then DO_BACKUP=0; shift; fi
 
+# --- Open WebUI guard --------------------------------------------------------
+# Open WebUI releases (e.g. 0.12.3) can migrate its database irreversibly.
+# Updating it therefore REQUIRES a pinned tag and a fresh backup of its volume.
+OWUI_VOL="donalabs_open_webui_data"
+OWUI_MAX_AGE_MIN="${OPENWEBUI_BACKUP_MAX_AGE_MIN:-60}"
+touches_openwebui() {
+  [ "$#" -eq 0 ] && return 0
+  local s; for s in "$@"; do [ "$s" = "open-webui" ] && return 0; done
+  return 1
+}
+fresh_openwebui_backup() {
+  # prints the newest backup dir with an Open WebUI volume newer than the max age
+  local m
+  m="$(find "${DONALABS_ROOT}/backups" -mindepth 2 -maxdepth 2 -name MANIFEST.txt \
+        -mmin "-${OWUI_MAX_AGE_MIN}" 2>/dev/null | xargs -r grep -l "vol  ${OWUI_VOL} " 2>/dev/null \
+        | xargs -r ls -1t 2>/dev/null | head -n1)"
+  [ -n "$m" ] && [ -s "$(dirname "$m")/${OWUI_VOL}_vol.tar.gz" ] && dirname "$m"
+}
+OWUI=0
+if touches_openwebui "$@"; then
+  OWUI=1
+  case "${OPENWEBUI_IMAGE_TAG:-}" in
+    ""|latest|main|dev|cuda|ollama)
+      die "OPENWEBUI_IMAGE_TAG must be an explicit version (e.g. v0.10.2), got '${OPENWEBUI_IMAGE_TAG:-<empty>}'" ;;
+  esac
+fi
+
 if [ "$DO_BACKUP" -eq 1 ]; then
   info "taking a safety backup before updating..."
-  "${DONALABS_ROOT}/backup.sh" || warn "backup failed — continuing (use --no-backup to skip intentionally)"
+  if ! "${DONALABS_ROOT}/backup.sh"; then
+    [ "$OWUI" -eq 1 ] && die "backup failed — refusing to update Open WebUI without a backup"
+    warn "backup failed — continuing (use --no-backup to skip intentionally)"
+  fi
+fi
+
+if [ "$OWUI" -eq 1 ]; then
+  if docker volume inspect "$OWUI_VOL" >/dev/null 2>&1; then
+    B="$(fresh_openwebui_backup || true)"
+    [ -n "$B" ] || die "no Open WebUI backup newer than ${OWUI_MAX_AGE_MIN} min in backups/ — run ./backup.sh first (update aborted)"
+    ok "Open WebUI backup verified: backups/$(basename "$B") (rollback: services/open-webui/README.md)"
+  else
+    info "Open WebUI volume does not exist yet (fresh install) — no backup needed"
+  fi
 fi
 
 info "pulling images..."

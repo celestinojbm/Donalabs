@@ -1,7 +1,8 @@
 name: Design System CI
 
-# Typechecks, lints, and builds the design-system monorepo (apps/showcase +
-# packages/ui). Runs on any change under design-system/ (or to this workflow).
+# Typechecks, lints, and builds the design-system monorepo (apps/showcase,
+# apps/landing, packages/ui). Runs on any change under design-system/ (or to
+# this workflow).
 
 on:
   push:

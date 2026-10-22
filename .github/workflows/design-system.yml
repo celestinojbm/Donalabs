@@ -1,7 +1,9 @@
 name: Design System CI
 
-# Typechecks, lints, and builds the design-system monorepo (apps/showcase +
-# packages/ui). Runs on any change under design-system/ (or to this workflow).
+# Typechecks, lints, tests, and builds the design-system monorepo
+# (apps/showcase, apps/landing, packages/ui). Runs on any change under
+# design-system/ (or to this workflow). The landing contact test is the only
+# JS suite.
 
 on:
   push:
@@ -31,7 +33,7 @@ env:
 
 jobs:
   build:
-    name: typecheck · lint · build
+    name: typecheck · lint · test · build
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -63,6 +65,9 @@ jobs:
 
       - name: Lint
         run: pnpm lint
+
+      - name: Test
+        run: pnpm --filter @donalabs/landing test
 
       - name: Build
         run: pnpm build

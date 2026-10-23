@@ -46,6 +46,19 @@ declare -A SECRETS=(
   [N8N_ENCRYPTION_KEY]="gen_hex 32"
   [N8N_DB_PASSWORD]="gen_hex 24"
   [OPENWEBUI_SECRET_KEY]="gen_hex 32"
+  [FIRECRAWL_PG_PASSWORD]="gen_hex 24"
+  [FIRECRAWL_BULL_AUTH_KEY]="gen_hex 32"
+  [NANGO_ENCRYPTION_KEY]="gen_b64 32"
+  [NANGO_DB_PASSWORD]="gen_hex 24"
+  [NANGO_DASHBOARD_PASSWORD]="gen_hex 24"
+  [SEARXNG_SECRET]="gen_hex 32"
+  [MINIO_ROOT_PASSWORD]="gen_b64 32"
+  [LANGFUSE_DB_PASSWORD]="gen_hex 24"
+  [LANGFUSE_SALT]="gen_b64 32"
+  [LANGFUSE_ENCRYPTION_KEY]="gen_hex 32"
+  [LANGFUSE_NEXTAUTH_SECRET]="gen_b64 32"
+  [LANGFUSE_REDIS_PASSWORD]="gen_hex 24"
+  [LANGFUSE_CLICKHOUSE_PASSWORD]="gen_hex 24"
 )
 
 # Vars whose value must be single-quoted in the .env file (may contain '$').

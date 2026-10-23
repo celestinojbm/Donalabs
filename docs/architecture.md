@@ -11,6 +11,8 @@ for other projects to consume.
 3. **Isolated** — a failure or restore in one service does not affect others.
 4. **Reproducible** — pinned versions, declarative config, one source of truth.
 5. **Safe by default** — local-only binding, generated secrets, optional TLS edge.
+6. **Agent-ready** — web data and connected-app access live in shared services rather than being reimplemented inside each product.
+7. **Observable** — agent traces/evaluations and durable artifacts are first-class shared infrastructure, not ad-hoc files inside product containers.
 
 ---
 
@@ -83,6 +85,11 @@ single compose project and gives consumers a stable, predictable name.
 | n8n | Postgres 16 | Recommended over SQLite for the automation hub |
 | Vaultwarden | SQLite (built-in) | Fine for personal scale; Postgres possible via `DATABASE_URL` |
 | Open WebUI | SQLite (built-in) | Fine for single-user; Postgres via `DATABASE_URL` for concurrency |
+| Firecrawl | NuQ Postgres + Redis + RabbitMQ | Queue/state isolated from the rest of DonaLabs; only the API joins the shared edge |
+| Nango | Postgres 16 + Redis | OAuth/integration state isolated from products; only the server joins the shared edge |
+| SearXNG | Valkey 9 | Search limiter/cache remains private; only the metasearch app joins the shared edge |
+| MinIO | S3-compatible object store | Shared durable blob/media/artifact storage; buckets isolate product workloads |
+| Langfuse | Postgres 17 + Redis 7 + ClickHouse 24.12 + shared MinIO | Agent traces/evals are isolated from product databases; only web/worker join the shared edge |
 
 **Why per-service databases rather than one shared Postgres:** each upstream
 project tests against a specific database version (Penpot on 15, others on 16,

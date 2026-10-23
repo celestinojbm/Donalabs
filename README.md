@@ -1,6 +1,6 @@
 # DonaLabs
 
-**Personal AI infrastructure & shared services platform.**
+**Shared AI infrastructure, integrations & agent services platform.**
 
 DonaLabs is not a product. It is a reusable, self-hosted platform that provides
 shared services — password management, scheduling, analytics, design, automation,
@@ -21,6 +21,11 @@ health-checked, backed up, and ready to be consumed by other projects.
 | **n8n** | Workflow automation | http://localhost:5678 | `http://n8n:5678` |
 | **Open WebUI** | Unified AI chat interface | http://localhost:3001 | `http://open-webui:8080` |
 | **yt-dlp** | Media utility (CLI, on demand) | — (`./services/ytdlp/ytdlp.sh`) | — |
+| **Firecrawl** *(optional)* | Web search, scraping & crawling for agents | http://localhost:3002 | `http://firecrawl-api:3002` |
+| **Nango** *(optional)* | OAuth/API integrations for products & agents | http://localhost:3003 | `http://nango-server:3003` |
+| **SearXNG** *(optional)* | Self-hosted metasearch for Firecrawl/agents | http://localhost:8088 | `http://searxng:8080` |
+| **MinIO** *(optional)* | Shared S3-compatible object storage | http://localhost:9001 | `http://minio:9000` |
+| **Langfuse** *(optional)* | LLM/agent tracing, evaluation & observability | http://localhost:3010 | `http://langfuse-web:3000` |
 
 Each service has its own detailed guide under [`services/<name>/README.md`](services/).
 
@@ -44,6 +49,12 @@ $EDITOR .env
 
 First boot pulls several GB of images and Cal.com/Plausible run database
 migrations, so the first `health.sh` may take a couple of minutes to go green.
+
+Firecrawl, Nango, SearXNG, MinIO and Langfuse are opt-in agent services and are not started by the default stack. Start the shared agent stack with:
+
+```bash
+./start.sh firecrawl-api nango-server searxng minio minio-init langfuse-web langfuse-worker
+```
 
 Then open the URLs above and create your first account in each service. See each
 service README for the first-run steps (most default to open signup for the first
@@ -74,6 +85,8 @@ disk to run the full stack, plus `openssl` and `bash` for the scripts.
 
 Full rationale and trade-offs: [`docs/architecture.md`](docs/architecture.md).
 
+Agent-facing service boundaries and the Tool Gateway direction are documented in [`docs/agent-platform.md`](docs/agent-platform.md).
+
 ---
 
 ## Repository structure
@@ -87,7 +100,12 @@ donalabs/
 │   ├── penpot/           # design
 │   ├── ytdlp/            # media utility (Dockerfile + safe wrapper)
 │   ├── n8n/              # automation
-│   └── open-webui/       # AI interface
+│   ├── open-webui/       # AI interface
+│   ├── firecrawl/        # web data API for agents
+│   ├── nango/            # OAuth/API integration layer
+│   ├── searxng/          # self-hosted metasearch
+│   ├── minio/            # shared S3-compatible object storage
+│   └── langfuse/         # LLM/agent observability and evals
 │   (each has its own docker-compose.yml and README.md)
 ├── design-system/        # shared UI component library + showcase app
 ├── proxy/                # optional Caddy reverse proxy (HTTPS)

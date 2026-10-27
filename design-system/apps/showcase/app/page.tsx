@@ -62,12 +62,12 @@ const SECTIONS = [
 export default function OverviewPage() {
   return (
     <div className="space-y-12">
-      <div className="space-y-4 border-b pb-8">
+      <div className="space-y-5 border-b pb-10">
         <Badge variant="secondary">Design System</Badge>
-        <h1 className="max-w-2xl text-3xl font-semibold tracking-tight sm:text-4xl">
+        <h1 className="max-w-[18ch] text-hero font-semibold tracking-tight text-balance">
           The shared design platform for DonaLabs
         </h1>
-        <p className="max-w-2xl text-muted-foreground">
+        <p className="max-w-3xl text-base leading-relaxed text-muted-foreground">
           One design system, owned as source code, consumed by every DonaLabs project.
           Built on Tailwind CSS v4, shadcn/ui (on Radix UI primitives), Motion, Magic UI,
           and Lucide — unified rather than stitched together.

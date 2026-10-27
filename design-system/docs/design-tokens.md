@@ -45,7 +45,22 @@ uses `bg-primary`/`text-primary` picks it up with no further changes.
 
 - **Sans:** Geist, loaded via `next/font/google` in `apps/showcase/app/layout.tsx`, exposed as the `--font-sans` CSS variable.
 - **Mono:** Geist Mono, same mechanism, `--font-mono`.
-- **Scale:** Tailwind's default type scale (`text-xs` through `text-4xl` and beyond) — not customized. There was no gap to fill here; the default scale is well-considered and widely understood.
+- **Scale:** customized in `packages/ui/src/styles/globals.css`. Root size stays 16px so spacing (`--spacing: 0.25rem`) does not grow with the type. `text-*` utilities read CSS variables, and a `min-width: 48rem` block raises them for desktop. `text-hero` is fluid on every width.
+
+| Token | Mobile | Desktop (48rem+) |
+|---|---|---|
+| `text-xs` | 16px | 18px |
+| `text-sm` | 18px | 20px |
+| `text-base` (body) | 18px | 22px |
+| `text-lg` | 22px | 26px |
+| `text-xl` | 26px | 32px |
+| `text-2xl` | 32px | 40px |
+| `text-3xl` | 40px | 52px |
+| `text-4xl` | 44px | 60px |
+| `text-5xl` | 52px | 72px |
+| `text-6xl` | 60px | 84px |
+| `text-7xl` | 72px | 96px |
+| `text-hero` | `clamp(2.75rem, 4.8vw + 1.15rem, 6rem)` — 44px up to 96px | same clamp |
 
 ## Spacing scale
 

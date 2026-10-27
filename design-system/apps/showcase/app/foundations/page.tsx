@@ -27,7 +27,7 @@ export default function FoundationsPage() {
       </Section>
       <Section
         title="Typography"
-        description="Geist (sans) and Geist Mono, loaded via next/font and exposed as CSS variables. A standard Tailwind type scale — no custom overrides needed."
+        description="Geist (sans) and Geist Mono, loaded via next/font and exposed as CSS variables. The scale is larger than Tailwind's default: body is 18px below 48rem and 22px from there, and text-hero runs from 44px to 96px."
       >
         <TypeScale />
       </Section>

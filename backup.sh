@@ -30,6 +30,8 @@ DEST="${DONALABS_ROOT}/backups/${STAMP}"
 mkdir -p "$DEST"
 MANIFEST="${DEST}/MANIFEST.txt"
 echo "DonaLabs backup ${STAMP} (UTC)" > "$MANIFEST"
+# update.sh requires this marker before updating Open WebUI (SQLite).
+[ "$CONSISTENT" -eq 1 ] && echo "mode consistent" >> "$MANIFEST"
 
 info "backup destination: backups/${STAMP}"
 

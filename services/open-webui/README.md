@@ -169,16 +169,18 @@ Reglas:
 
 Procedimiento:
 1. Lee las notas de la versión destino.
-2. `./backup.sh --consistent` (detiene Open WebUI durante la copia, para que SQLite quede consistente).
+2. Opcional: `./backup.sh --consistent`. `update.sh` lo hace solo cuando toca Open WebUI (detiene unos segundos los contenedores de apps) y exige un respaldo consistente y legible.
 3. Sube `OPENWEBUI_IMAGE_TAG` en `.env` y ejecuta `./update.sh open-webui`.
 4. Verifica con `./scripts/health.sh` y entra a la UI.
 
-Rollback (si la versión nueva falla o la migración rompe datos):
+Rollback (si la versión nueva falla o la migración rompe datos). Restaura **solo** Open WebUI; no uses `scripts/restore.sh`, que restaura todos los servicios del respaldo y vuelve a arrancar el contenedor con la imagen nueva (que migraría otra vez):
 1. Vuelve a poner en `.env` el `OPENWEBUI_IMAGE_TAG` anterior (está en `backups/<stamp>/env.backup`).
-2. `docker stop donalabs-open-webui`
-3. Restaura el volumen: `./scripts/restore.sh backups/<stamp>` o a mano:
+2. Elimina el contenedor (no basta con `stop`): `docker rm -f donalabs-open-webui`
+3. Restaura solo su volumen, desde la raíz del repo:
    ```bash
-   docker run --rm -v donalabs_open_webui_data:/data -v "$PWD/backups/<stamp>":/b alpine:3.21 \
-     sh -c 'rm -rf /data/* /data/.[!.]* 2>/dev/null; tar xzf /b/donalabs_open_webui_data_vol.tar.gz -C /data'
+   docker run --rm -v donalabs_open_webui_data:/data -v "$PWD/backups/<stamp>":/b:ro alpine:3.21 \
+     sh -c 'rm -rf /data/* /data/.[!.]* /data/..?* 2>/dev/null; tar xzf /b/donalabs_open_webui_data_vol.tar.gz -C /data'
    ```
-4. `docker compose -f services/open-webui/docker-compose.yml up -d` y verifica.
+4. Desde la raíz del repo (lee el `.env` raíz): `docker compose up -d open-webui`, y verifica con `./scripts/health.sh`.
+
+Nota de migración: el compose ya no tiene versión por defecto; un `.env` antiguo sin `OPENWEBUI_IMAGE_TAG` hace fallar cualquier comando compose del stack. Añade `OPENWEBUI_IMAGE_TAG=v0.10.2` (está en `.env.example`).

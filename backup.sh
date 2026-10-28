@@ -5,6 +5,9 @@
 #   ./backup.sh                 back up all databases + data volumes + .env
 #   ./backup.sh --consistent    stop app containers during volume snapshots for
 #                               crash-consistent copies (brief downtime)
+#   ./backup.sh --consistent --only open-webui
+#                               back up only Open WebUI's volume (+ .env),
+#                               stopping only its container (used by update.sh)
 #
 # Output: backups/<timestamp>/ containing:
 #   *_pg.sql.gz     logical Postgres dumps (Cal.com, Plausible, Penpot, n8n)
@@ -13,7 +16,8 @@
 #   env.backup      a copy of .env (SECRETS — keep this backup private!)
 #   MANIFEST.txt    what was captured
 #
-# Old backups beyond BACKUP_RETENTION (default 7) are pruned.
+# Old backups are pruned per kind: full ones beyond BACKUP_RETENTION (default 7),
+# --only open-webui ones beyond OPENWEBUI_BACKUP_RETENTION (default 3).
 # Restore with: ./scripts/restore.sh backups/<timestamp>
 # =============================================================================
 set -euo pipefail
@@ -23,18 +27,34 @@ require_docker
 load_env
 
 CONSISTENT=0
-[ "${1:-}" = "--consistent" ] && CONSISTENT=1
+ONLY=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --consistent) CONSISTENT=1 ;;
+    --only) [ "${2:-}" = "open-webui" ] || die "--only supports: open-webui"; ONLY="$2"; shift ;;
+    *) die "unknown option: $1" ;;
+  esac
+  shift
+done
+if [ "$ONLY" = "open-webui" ]; then
+  # Scope to Open WebUI: no Postgres dumps, one volume, one container stopped.
+  PG_DATABASES=()
+  DATA_VOLUMES=(donalabs_open_webui_data)
+fi
 
 STAMP="$(date -u +%Y%m%d-%H%M%S)"
 DEST="${DONALABS_ROOT}/backups/${STAMP}"
 mkdir -p "$DEST"
 MANIFEST="${DEST}/MANIFEST.txt"
 echo "DonaLabs backup ${STAMP} (UTC)" > "$MANIFEST"
+[ -n "$ONLY" ] && echo "scope $ONLY" >> "$MANIFEST"
+# update.sh requires this marker before updating Open WebUI (SQLite).
+[ "$CONSISTENT" -eq 1 ] && echo "mode consistent" >> "$MANIFEST"
 
 info "backup destination: backups/${STAMP}"
 
 # --- 1. Postgres logical dumps ----------------------------------------------
-for entry in "${PG_DATABASES[@]}"; do
+for entry in "${PG_DATABASES[@]+"${PG_DATABASES[@]}"}"; do
   IFS=: read -r container uvar dvar <<< "$entry"
   user="${!uvar:-}"; db="${!dvar:-}"
   if docker ps --format '{{.Names}}' | grep -qx "$container"; then
@@ -53,6 +73,7 @@ done
 # --- 2. Named data volume snapshots -----------------------------------------
 # app containers that write to the volumes we tar (for --consistent mode)
 STOP_FOR_CONSISTENCY=(donalabs-vaultwarden donalabs-open-webui donalabs-n8n donalabs-plausible donalabs-penpot-backend)
+[ "$ONLY" = "open-webui" ] && STOP_FOR_CONSISTENCY=(donalabs-open-webui)
 if [ "$CONSISTENT" -eq 1 ]; then
   info "consistent mode: stopping app containers during snapshot..."
   for c in "${STOP_FOR_CONSISTENCY[@]}"; do docker stop "$c" >/dev/null 2>&1 || true; done
@@ -83,9 +104,26 @@ echo "env  .env -> env.backup (SENSITIVE)" >> "$MANIFEST"
 ok ".env copied to env.backup (keep this backup private)"
 
 # --- 4. Retention ------------------------------------------------------------
-RETENTION="${BACKUP_RETENTION:-7}"
-mapfile -t OLD < <(ls -1dt "${DONALABS_ROOT}/backups"/*/ 2>/dev/null | tail -n +"$((RETENTION+1))")
-for d in "${OLD[@]:-}"; do [ -n "$d" ] && rm -rf "$d" && info "pruned old backup $(basename "$d")"; done
+# Two independent pools, so pruning one kind never deletes the other:
+#   full backups          -> BACKUP_RETENTION (default 7)
+#   "scope open-webui"    -> OPENWEBUI_BACKUP_RETENTION (default 3)
+# Backups without a scope line (legacy or full) count as full.
+backup_scope() {
+  local m="${1}MANIFEST.txt" line
+  line="$(grep -m1 '^scope ' "$m" 2>/dev/null || true)"
+  printf '%s\n' "${line#scope }"
+}
+prune_pool() {  # $1 = scope ("" for full), $2 = how many to keep
+  local want="$1" keep="$2" d n=0
+  while IFS= read -r d; do
+    [ "$(backup_scope "$d")" = "$want" ] || continue
+    n=$((n+1))
+    [ "$n" -le "$keep" ] && continue
+    rm -rf "$d" && info "pruned old ${want:-full} backup $(basename "$d")"
+  done < <(ls -1dr "${DONALABS_ROOT}/backups"/*/ 2>/dev/null)  # newest first (UTC stamps)
+}
+prune_pool ""           "${BACKUP_RETENTION:-7}"
+prune_pool "open-webui" "${OPENWEBUI_BACKUP_RETENTION:-3}"
 
 echo
 ok "backup complete: backups/${STAMP} ($(du -sh "$DEST" | cut -f1))"

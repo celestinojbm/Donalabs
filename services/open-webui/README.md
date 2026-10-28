@@ -158,3 +158,29 @@ curl -fsS http://localhost:3001/health   # -> 200 {"status":true}
 - **Other services get connection errors:** they're likely using `localhost:3001`. Internal callers must use `http://open-webui:8080` and be attached to `donalabs_edge`.
 - **Lost data after `docker compose down -v` or a fresh volume:** state lives only in `donalabs_open_webui_data`. Restore from your tar backup; never use `-v` on this stack unless you intend to wipe it.
 - **Slow / locked under concurrent load:** the default SQLite backend is single-writer. Point the container at Postgres by adding `DATABASE_URL=postgresql://user:pass@host:5432/openwebui` to the service environment (not wired into `.env` by default) and restart.
+
+## Actualización segura y rollback (obligatorio)
+
+Open WebUI puede migrar su base de datos al actualizar (p. ej. **0.12.3**, 17-oct-2026, cambia el esquema y pide respaldo). Una migración no se deshace bajando la versión de la imagen: el único rollback es restaurar el volumen.
+
+Reglas:
+- `OPENWEBUI_IMAGE_TAG` siempre es una versión explícita (`vX.Y.Z`). El compose falla si está vacía y `update.sh` rechaza `latest`, `main`, etc.
+- `./update.sh` (todo) o `./update.sh open-webui` **se niega a continuar** si no hay en `backups/` un respaldo del volumen `donalabs_open_webui_data` de menos de `OPENWEBUI_BACKUP_MAX_AGE_MIN` minutos (60 por defecto). `--no-backup` no se salta esta verificación.
+
+Procedimiento:
+1. Lee las notas de la versión destino.
+2. Opcional: `./backup.sh --consistent --only open-webui`. `update.sh` lo hace solo cuando toca Open WebUI: detiene unos segundos **solo** `donalabs-open-webui`, respalda su volumen y `.env`, y exige un respaldo consistente y legible. Estos respaldos tienen su propia retención, `OPENWEBUI_BACKUP_RETENTION` (3 por defecto), independiente de `BACKUP_RETENTION` (respaldos completos); podar unos nunca borra los otros. Los respaldos sin línea `scope` (antiguos) cuentan como completos.
+3. Sube `OPENWEBUI_IMAGE_TAG` en `.env` y ejecuta `./update.sh open-webui`.
+4. Verifica con `./scripts/health.sh` y entra a la UI.
+
+Rollback (si la versión nueva falla o la migración rompe datos). Restaura **solo** Open WebUI; no uses `scripts/restore.sh`, que restaura todos los servicios del respaldo y vuelve a arrancar el contenedor con la imagen nueva (que migraría otra vez):
+1. Vuelve a poner en `.env` el `OPENWEBUI_IMAGE_TAG` anterior (está en `backups/<stamp>/env.backup`).
+2. Elimina el contenedor (no basta con `stop`): `docker rm -f donalabs-open-webui`
+3. Restaura solo su volumen, desde la raíz del repo:
+   ```bash
+   docker run --rm -v donalabs_open_webui_data:/data -v "$PWD/backups/<stamp>":/b:ro alpine:3.21 \
+     sh -c 'rm -rf /data/* /data/.[!.]* /data/..?* 2>/dev/null; tar xzf /b/donalabs_open_webui_data_vol.tar.gz -C /data'
+   ```
+4. Desde la raíz del repo (lee el `.env` raíz): `docker compose up -d open-webui`, y verifica con `./scripts/health.sh`.
+
+Nota de migración: el compose ya no tiene versión por defecto; un `.env` antiguo sin `OPENWEBUI_IMAGE_TAG` hace fallar cualquier comando compose del stack. Añade `OPENWEBUI_IMAGE_TAG=v0.10.2` (está en `.env.example`).

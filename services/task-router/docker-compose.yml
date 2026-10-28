@@ -1,0 +1,39 @@
+# =============================================================================
+# Task router (PoC, optional) — a local Ollama model decides which agent gets
+# each task. Only starts with:  docker compose --profile router up -d
+# =============================================================================
+services:
+  router-ollama:
+    image: ollama/ollama:${ROUTER_OLLAMA_IMAGE_TAG:-0.40.8}
+    container_name: donalabs-router-ollama
+    profiles: ["router"]
+    restart: unless-stopped
+    volumes:
+      - router_ollama_models:/root/.ollama
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${ROUTER_OLLAMA_HOST_PORT:-11435}:11434"
+    networks: [edge]
+
+  task-router:
+    image: python:3.12-alpine
+    container_name: donalabs-task-router
+    profiles: ["router"]
+    depends_on: [router-ollama]
+    working_dir: /app
+    volumes:
+      - ./:/app:ro
+    environment:
+      OLLAMA_URL: http://router-ollama:11434
+      ROUTER_MODEL: ${ROUTER_MODEL:-qwen2.5:1.5b}
+    # one-shot: route the sample tasks and exit
+    command: ["python", "router.py", "--tasks", "sample-tasks.json"]
+    networks: [edge]
+
+volumes:
+  router_ollama_models:
+    name: donalabs_router_ollama_models
+
+networks:
+  edge:
+    external: true
+    name: ${EDGE_NETWORK:-donalabs_edge}

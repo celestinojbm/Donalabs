@@ -1,5 +1,5 @@
 import type { Metadata } from "next"
-import { Geist, Geist_Mono } from "next/font/google"
+import localFont from "next/font/local"
 
 import "@donalabs/ui/globals.css"
 import { cn } from "@donalabs/ui/lib/utils"
@@ -11,11 +11,22 @@ import { ThemeProvider } from "@/components/theme-provider"
 import { AppSidebar } from "@/components/app-sidebar"
 import { SiteHeader } from "@/components/site-header"
 
-const geist = Geist({ subsets: ["latin"], variable: "--font-sans" })
+const geist = localFont({
+  // Geist (variable, latin subset), self-hosted via @fontsource-variable (OFL-1.1)
+  src: "../node_modules/@fontsource-variable/geist/files/geist-latin-wght-normal.woff2",
+  weight: "100 900",
+  style: "normal",
+  variable: "--font-sans",
+  preload: true,
+})
 
-const fontMono = Geist_Mono({
-  subsets: ["latin"],
+const fontMono = localFont({
+  // Geist Mono (variable, latin subset), self-hosted via @fontsource-variable (OFL-1.1)
+  src: "../node_modules/@fontsource-variable/geist-mono/files/geist-mono-latin-wght-normal.woff2",
+  weight: "100 900",
+  style: "normal",
   variable: "--font-mono",
+  preload: true,
 })
 
 export const metadata: Metadata = {

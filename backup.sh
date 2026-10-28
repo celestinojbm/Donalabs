@@ -16,7 +16,8 @@
 #   env.backup      a copy of .env (SECRETS — keep this backup private!)
 #   MANIFEST.txt    what was captured
 #
-# Old backups beyond BACKUP_RETENTION (default 7) are pruned.
+# Old backups are pruned per kind: full ones beyond BACKUP_RETENTION (default 7),
+# --only open-webui ones beyond OPENWEBUI_BACKUP_RETENTION (default 3).
 # Restore with: ./scripts/restore.sh backups/<timestamp>
 # =============================================================================
 set -euo pipefail
@@ -103,9 +104,26 @@ echo "env  .env -> env.backup (SENSITIVE)" >> "$MANIFEST"
 ok ".env copied to env.backup (keep this backup private)"
 
 # --- 4. Retention ------------------------------------------------------------
-RETENTION="${BACKUP_RETENTION:-7}"
-mapfile -t OLD < <(ls -1dt "${DONALABS_ROOT}/backups"/*/ 2>/dev/null | tail -n +"$((RETENTION+1))")
-for d in "${OLD[@]:-}"; do [ -n "$d" ] && rm -rf "$d" && info "pruned old backup $(basename "$d")"; done
+# Two independent pools, so pruning one kind never deletes the other:
+#   full backups          -> BACKUP_RETENTION (default 7)
+#   "scope open-webui"    -> OPENWEBUI_BACKUP_RETENTION (default 3)
+# Backups without a scope line (legacy or full) count as full.
+backup_scope() {
+  local m="${1}MANIFEST.txt" line
+  line="$(grep -m1 '^scope ' "$m" 2>/dev/null || true)"
+  printf '%s\n' "${line#scope }"
+}
+prune_pool() {  # $1 = scope ("" for full), $2 = how many to keep
+  local want="$1" keep="$2" d n=0
+  while IFS= read -r d; do
+    [ "$(backup_scope "$d")" = "$want" ] || continue
+    n=$((n+1))
+    [ "$n" -le "$keep" ] && continue
+    rm -rf "$d" && info "pruned old ${want:-full} backup $(basename "$d")"
+  done < <(ls -1dr "${DONALABS_ROOT}/backups"/*/ 2>/dev/null)  # newest first (UTC stamps)
+}
+prune_pool ""           "${BACKUP_RETENTION:-7}"
+prune_pool "open-webui" "${OPENWEBUI_BACKUP_RETENTION:-3}"
 
 echo
 ok "backup complete: backups/${STAMP} ($(du -sh "$DEST" | cut -f1))"

@@ -169,7 +169,7 @@ Reglas:
 
 Procedimiento:
 1. Lee las notas de la versión destino.
-2. Opcional: `./backup.sh --consistent --only open-webui`. `update.sh` lo hace solo cuando toca Open WebUI: detiene unos segundos **solo** `donalabs-open-webui`, respalda su volumen y `.env`, y exige un respaldo consistente y legible.
+2. Opcional: `./backup.sh --consistent --only open-webui`. `update.sh` lo hace solo cuando toca Open WebUI: detiene unos segundos **solo** `donalabs-open-webui`, respalda su volumen y `.env`, y exige un respaldo consistente y legible. Estos respaldos tienen su propia retención, `OPENWEBUI_BACKUP_RETENTION` (3 por defecto), independiente de `BACKUP_RETENTION` (respaldos completos); podar unos nunca borra los otros. Los respaldos sin línea `scope` (antiguos) cuentan como completos.
 3. Sube `OPENWEBUI_IMAGE_TAG` en `.env` y ejecuta `./update.sh open-webui`.
 4. Verifica con `./scripts/health.sh` y entra a la UI.
 

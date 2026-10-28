@@ -86,4 +86,7 @@ export const repoLinks = {
 } as const
 
 export const cloneCommand =
-  "git clone https://github.com/celestinojbm/Donalabs && ./start.sh"
+  "git clone https://github.com/celestinojbm/Donalabs && cd Donalabs && ./scripts/generate-secrets.sh && ./start.sh"
+
+// Public origin for canonical/hreflang URLs. Set NEXT_PUBLIC_SITE_URL at build time.
+export const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000"

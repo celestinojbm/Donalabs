@@ -39,11 +39,19 @@ export function Header({ locale, t }: HeaderProps) {
       }
     }
     document.addEventListener("keydown", onKey)
+    // Close when the viewport reaches xl (panel is hidden there), else the
+    // body scroll lock would stay on with no visible menu.
+    const desktop = window.matchMedia("(min-width: 80rem)")
+    const onDesktop = () => {
+      if (desktop.matches) setOpen(false)
+    }
+    desktop.addEventListener("change", onDesktop)
     const previous = document.body.style.overflow
     document.body.style.overflow = "hidden"
     panelRef.current?.querySelector<HTMLElement>("a")?.focus()
     return () => {
       document.removeEventListener("keydown", onKey)
+      desktop.removeEventListener("change", onDesktop)
       document.body.style.overflow = previous
     }
   }, [open])

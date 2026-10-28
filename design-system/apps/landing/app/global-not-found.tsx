@@ -1,7 +1,16 @@
+import type { Metadata } from "next"
 import Link from "next/link"
 
-export default function NotFound() {
+import { fontVariables } from "@/lib/fonts"
+
+import "./globals.css"
+
+export const metadata: Metadata = { title: "404 · DonaLabs" }
+
+export default function GlobalNotFound() {
   return (
+    <html lang="en" className={fontVariables}>
+      <body className="antialiased">
     <main className="mx-auto flex min-h-screen max-w-[1600px] flex-col justify-center px-5 md:px-16">
       <p className="kicker">404</p>
       <h1 className="display mt-4 text-[clamp(3rem,8vw,6rem)]">
@@ -20,5 +29,7 @@ export default function NotFound() {
         </Link>
       </div>
     </main>
+      </body>
+    </html>
   )
 }

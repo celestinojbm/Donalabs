@@ -5,6 +5,9 @@
 #   ./backup.sh                 back up all databases + data volumes + .env
 #   ./backup.sh --consistent    stop app containers during volume snapshots for
 #                               crash-consistent copies (brief downtime)
+#   ./backup.sh --consistent --only open-webui
+#                               back up only Open WebUI's volume (+ .env),
+#                               stopping only its container (used by update.sh)
 #
 # Output: backups/<timestamp>/ containing:
 #   *_pg.sql.gz     logical Postgres dumps (Cal.com, Plausible, Penpot, n8n)
@@ -23,20 +26,34 @@ require_docker
 load_env
 
 CONSISTENT=0
-[ "${1:-}" = "--consistent" ] && CONSISTENT=1
+ONLY=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --consistent) CONSISTENT=1 ;;
+    --only) [ "${2:-}" = "open-webui" ] || die "--only supports: open-webui"; ONLY="$2"; shift ;;
+    *) die "unknown option: $1" ;;
+  esac
+  shift
+done
+if [ "$ONLY" = "open-webui" ]; then
+  # Scope to Open WebUI: no Postgres dumps, one volume, one container stopped.
+  PG_DATABASES=()
+  DATA_VOLUMES=(donalabs_open_webui_data)
+fi
 
 STAMP="$(date -u +%Y%m%d-%H%M%S)"
 DEST="${DONALABS_ROOT}/backups/${STAMP}"
 mkdir -p "$DEST"
 MANIFEST="${DEST}/MANIFEST.txt"
 echo "DonaLabs backup ${STAMP} (UTC)" > "$MANIFEST"
+[ -n "$ONLY" ] && echo "scope $ONLY" >> "$MANIFEST"
 # update.sh requires this marker before updating Open WebUI (SQLite).
 [ "$CONSISTENT" -eq 1 ] && echo "mode consistent" >> "$MANIFEST"
 
 info "backup destination: backups/${STAMP}"
 
 # --- 1. Postgres logical dumps ----------------------------------------------
-for entry in "${PG_DATABASES[@]}"; do
+for entry in "${PG_DATABASES[@]+"${PG_DATABASES[@]}"}"; do
   IFS=: read -r container uvar dvar <<< "$entry"
   user="${!uvar:-}"; db="${!dvar:-}"
   if docker ps --format '{{.Names}}' | grep -qx "$container"; then
@@ -55,6 +72,7 @@ done
 # --- 2. Named data volume snapshots -----------------------------------------
 # app containers that write to the volumes we tar (for --consistent mode)
 STOP_FOR_CONSISTENCY=(donalabs-vaultwarden donalabs-open-webui donalabs-n8n donalabs-plausible donalabs-penpot-backend)
+[ "$ONLY" = "open-webui" ] && STOP_FOR_CONSISTENCY=(donalabs-open-webui)
 if [ "$CONSISTENT" -eq 1 ]; then
   info "consistent mode: stopping app containers during snapshot..."
   for c in "${STOP_FOR_CONSISTENCY[@]}"; do docker stop "$c" >/dev/null 2>&1 || true; done

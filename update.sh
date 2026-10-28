@@ -56,9 +56,9 @@ if [ "$DO_BACKUP" -eq 1 ]; then
   info "taking a safety backup before updating..."
   BACKUP_ARGS=()
   # Open WebUI uses SQLite: only a backup with its container stopped is safe
-  # before an irreversible migration (brief downtime for the app containers).
-  [ "$OWUI" -eq 1 ] && BACKUP_ARGS=(--consistent)
-  if ! "${DONALABS_ROOT}/backup.sh" "${BACKUP_ARGS[@]}"; then
+  # before an irreversible migration. Scoped so only Open WebUI is stopped.
+  [ "$OWUI" -eq 1 ] && BACKUP_ARGS=(--consistent --only open-webui)
+  if ! "${DONALABS_ROOT}/backup.sh" "${BACKUP_ARGS[@]+"${BACKUP_ARGS[@]}"}"; then
     [ "$OWUI" -eq 1 ] && die "backup failed — refusing to update Open WebUI without a backup"
     warn "backup failed — continuing (use --no-backup to skip intentionally)"
   fi
@@ -68,7 +68,7 @@ if [ "$OWUI" -eq 1 ]; then
   VOLS="$(docker volume ls -q)" || die "cannot list Docker volumes — refusing to update Open WebUI"
   if grep -qx "$OWUI_VOL" <<< "$VOLS"; then
     B="$(fresh_openwebui_backup || true)"
-    [ -n "$B" ] || die "no consistent Open WebUI backup newer than ${OWUI_MAX_AGE_MIN} min in backups/ — run ./backup.sh --consistent first (update aborted)"
+    [ -n "$B" ] || die "no consistent Open WebUI backup newer than ${OWUI_MAX_AGE_MIN} min in backups/ — run ./backup.sh --consistent --only open-webui first (update aborted)"
     ok "Open WebUI backup verified: backups/$(basename "$B") (rollback: services/open-webui/README.md)"
   else
     info "Open WebUI volume does not exist yet (fresh install) — no backup needed"

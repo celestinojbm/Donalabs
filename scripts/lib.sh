@@ -75,6 +75,9 @@ PG_DATABASES=(
   "donalabs-plausible-db:PLAUSIBLE_DB_USER:PLAUSIBLE_DB_NAME"
   "donalabs-penpot-db:PENPOT_DB_USER:PENPOT_DB_NAME"
   "donalabs-n8n-db:N8N_DB_USER:N8N_DB_NAME"
+  "donalabs-firecrawl-postgres:FIRECRAWL_PG_USER:FIRECRAWL_PG_DB"
+  "donalabs-nango-db:NANGO_DB_USER:NANGO_DB_NAME"
+  "donalabs-langfuse-postgres:LANGFUSE_DB_USER:LANGFUSE_DB_NAME"
 )
 
 # Named data volumes to snapshot (Postgres data is captured via pg_dump instead).
@@ -86,6 +89,15 @@ DATA_VOLUMES=(
   "donalabs_penpot_assets"
   "donalabs_plausible_data"
   "donalabs_plausible_event_data"
+  "donalabs_firecrawl_redis_data"
+  "donalabs_firecrawl_rabbitmq_data"
+  "donalabs_nango_redis_data"
+  "donalabs_searxng_cache"
+  "donalabs_searxng_valkey_data"
+  "donalabs_minio_data"
+  "donalabs_langfuse_redis_data"
+  "donalabs_langfuse_clickhouse_data"
+  "donalabs_langfuse_clickhouse_logs"
 )
 
 # Health probes as "label|url" (checked from the host against published ports).

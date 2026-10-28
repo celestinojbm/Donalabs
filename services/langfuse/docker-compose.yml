@@ -1,0 +1,161 @@
+# =============================================================================
+# Langfuse — shared LLM/agent observability and evaluation platform.
+# Reuses DonaLabs MinIO for S3-compatible object storage.
+# =============================================================================
+
+x-langfuse-env: &langfuse-env
+  NEXTAUTH_URL: ${LANGFUSE_URL:-http://localhost:3010}
+  DATABASE_URL: postgresql://${LANGFUSE_DB_USER:-langfuse}:${LANGFUSE_DB_PASSWORD}@langfuse-postgres:5432/${LANGFUSE_DB_NAME:-langfuse}
+  SALT: ${LANGFUSE_SALT}
+  ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY}
+  TELEMETRY_ENABLED: ${LANGFUSE_TELEMETRY_ENABLED:-false}
+  CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+  CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+  CLICKHOUSE_USER: ${LANGFUSE_CLICKHOUSE_USER:-clickhouse}
+  CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD}
+  REDIS_HOST: langfuse-redis
+  REDIS_PORT: 6379
+  REDIS_AUTH: ${LANGFUSE_REDIS_PASSWORD}
+  LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+  LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+  LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+  LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+  LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+  LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+  LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+  LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+  LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
+  LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+  LANGFUSE_S3_BATCH_EXPORT_ENABLED: "true"
+  LANGFUSE_S3_BATCH_EXPORT_BUCKET: langfuse
+  LANGFUSE_S3_BATCH_EXPORT_PREFIX: exports/
+  LANGFUSE_S3_BATCH_EXPORT_REGION: auto
+  LANGFUSE_S3_BATCH_EXPORT_ENDPOINT: http://minio:9000
+  LANGFUSE_S3_BATCH_EXPORT_EXTERNAL_ENDPOINT: http://localhost:${MINIO_API_HOST_PORT:-9000}
+  LANGFUSE_S3_BATCH_EXPORT_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+  LANGFUSE_S3_BATCH_EXPORT_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+  LANGFUSE_S3_BATCH_EXPORT_FORCE_PATH_STYLE: "true"
+
+x-langfuse-depends: &langfuse-depends
+  langfuse-postgres:
+    condition: service_healthy
+  langfuse-clickhouse:
+    condition: service_healthy
+  langfuse-redis:
+    condition: service_healthy
+
+services:
+  langfuse-web:
+    profiles: ["agents"]
+    image: docker.langfuse.com/langfuse/langfuse:${LANGFUSE_IMAGE_TAG:-4.37.0}
+    container_name: donalabs-langfuse-web
+    restart: unless-stopped
+    depends_on: *langfuse-depends
+    environment:
+      <<: *langfuse-env
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET}
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${LANGFUSE_HOST_PORT:-3010}:3000"
+    networks:
+      - langfuse_internal
+      - donalabs_edge
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  langfuse-worker:
+    profiles: ["agents"]
+    image: docker.langfuse.com/langfuse/langfuse-worker:${LANGFUSE_IMAGE_TAG:-4.37.0}
+    container_name: donalabs-langfuse-worker
+    restart: unless-stopped
+    depends_on: *langfuse-depends
+    environment:
+      <<: *langfuse-env
+    networks:
+      - langfuse_internal
+      - donalabs_edge
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  langfuse-postgres:
+    profiles: ["agents"]
+    image: postgres:${LANGFUSE_POSTGRES_VERSION:-17}-alpine
+    container_name: donalabs-langfuse-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${LANGFUSE_DB_USER:-langfuse}
+      POSTGRES_PASSWORD: ${LANGFUSE_DB_PASSWORD}
+      POSTGRES_DB: ${LANGFUSE_DB_NAME:-langfuse}
+    volumes:
+      - langfuse_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${LANGFUSE_DB_USER:-langfuse} -d ${LANGFUSE_DB_NAME:-langfuse}"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+    networks:
+      - langfuse_internal
+
+  langfuse-redis:
+    profiles: ["agents"]
+    image: redis:7-alpine
+    container_name: donalabs-langfuse-redis
+    restart: unless-stopped
+    command: redis-server --requirepass ${LANGFUSE_REDIS_PASSWORD} --maxmemory-policy noeviction
+    volumes:
+      - langfuse_redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a ${LANGFUSE_REDIS_PASSWORD} ping | grep PONG"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+    networks:
+      - langfuse_internal
+
+  langfuse-clickhouse:
+    profiles: ["agents"]
+    image: clickhouse/clickhouse-server:${LANGFUSE_CLICKHOUSE_VERSION:-24.12-alpine}
+    container_name: donalabs-langfuse-clickhouse
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: ${LANGFUSE_CLICKHOUSE_USER:-clickhouse}
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD}
+    volumes:
+      - langfuse_clickhouse_data:/var/lib/clickhouse
+      - langfuse_clickhouse_logs:/var/log/clickhouse-server
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8123/ping || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - langfuse_internal
+
+networks:
+  donalabs_edge:
+    external: true
+    name: ${EDGE_NETWORK:-donalabs_edge}
+  langfuse_internal:
+    name: donalabs_langfuse_internal
+    internal: true
+
+volumes:
+  langfuse_postgres_data:
+    name: donalabs_langfuse_postgres_data
+  langfuse_redis_data:
+    name: donalabs_langfuse_redis_data
+  langfuse_clickhouse_data:
+    name: donalabs_langfuse_clickhouse_data
+  langfuse_clickhouse_logs:
+    name: donalabs_langfuse_clickhouse_logs

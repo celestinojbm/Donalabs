@@ -89,7 +89,7 @@ donalabs/
 │   ├── n8n/              # automation
 │   └── open-webui/       # AI interface
 │   (each has its own docker-compose.yml and README.md)
-├── design-system/        # shared UI component library + showcase app
+├── design-system/        # UI library, showcase, and the Donalabs landing
 ├── proxy/                # optional Caddy reverse proxy (HTTPS)
 ├── scripts/             # generate-secrets, health, restore, proxy, lib, ...
 ├── backups/             # timestamped backups (git-ignored)

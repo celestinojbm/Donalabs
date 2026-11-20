@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Fake `docker` for script tests. No daemon, no images: it simulates only the
+# calls backup.sh makes, driven by environment variables:
+#
+#   FAKE_RUNNING      space-separated container names reported by `docker ps`
+#   FAKE_VOLUMES      space-separated volume names that `volume inspect` finds
+#   FAKE_PGDUMP_FAIL  container whose `pg_dump` exits non-zero
+#   FAKE_TAR_FAIL     volume whose tar snapshot (`docker run`) exits non-zero
+#   FAKE_LOG          file every invocation is appended to (one line per call)
+set -euo pipefail
+
+[ -n "${FAKE_LOG:-}" ] && printf '%s\n' "$*" >> "$FAKE_LOG"
+
+in_list() { case " $2 " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
+case "${1:-}" in
+  info) exit 0 ;;
+  compose) [ "${2:-}" = "version" ] && { echo "Docker Compose version v2-fake"; exit 0; }; exit 0 ;;
+  ps)
+    for c in ${FAKE_RUNNING:-}; do echo "$c"; done ;;
+  exec)
+    container="$2"
+    if [ "$container" = "${FAKE_PGDUMP_FAIL:-}" ]; then echo "pg_dump: error" >&2; exit 1; fi
+    echo "-- fake dump of $container" ;;
+  volume)
+    [ "${2:-}" = "inspect" ] || exit 1
+    in_list "$3" "${FAKE_VOLUMES:-}" ;;
+  run)
+    vol="" backup_dir="" last=""
+    for a in "$@"; do
+      case "$a" in
+        *:/src:ro) vol="${a%%:/src:ro}" ;;
+        *:/backup) backup_dir="${a%%:/backup}" ;;
+      esac
+      last="$a"
+    done
+    [ "$vol" = "${FAKE_TAR_FAIL:-}" ] && { echo "tar: error" >&2; exit 1; }
+    name="$(sed -n 's#.*tar czf /backup/\([^ ]*\).*#\1#p' <<< "$last")"
+    [ -n "$backup_dir" ] && [ -n "$name" ] || { echo "fake docker: unexpected run: $*" >&2; exit 1; }
+    echo "fake tar of $vol" > "$backup_dir/$name" ;;
+  stop|start) exit 0 ;;
+  *) echo "fake docker: unsupported: $*" >&2; exit 1 ;;
+esac

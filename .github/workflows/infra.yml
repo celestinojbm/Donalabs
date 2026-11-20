@@ -65,7 +65,7 @@ jobs:
       - name: Verify helper scripts are executable
         run: |
           rc=0
-          for s in start.sh stop.sh update.sh backup.sh scripts/*.sh services/ytdlp/ytdlp.sh; do
+          for s in start.sh stop.sh update.sh backup.sh scripts/*.sh services/ytdlp/ytdlp.sh tests/run.sh tests/*.test.sh tests/fakes/docker; do
             if [ -x "$s" ]; then
               echo "  ok   $s"
             else
@@ -80,4 +80,11 @@ jobs:
         # (the runner version) and 0.11.0.
         run: |
           shellcheck --severity=warning --external-sources \
-            start.sh stop.sh update.sh backup.sh scripts/*.sh services/ytdlp/ytdlp.sh
+            start.sh stop.sh update.sh backup.sh scripts/*.sh services/ytdlp/ytdlp.sh \
+            tests/*.sh tests/fakes/docker
+
+      - name: Script tests
+        # Behavioural tests for the helper scripts (backup.sh completeness,
+        # exit codes, retention safety). They use tests/fakes/docker, so no
+        # Docker daemon is needed and nothing is pulled.
+        run: ./tests/run.sh

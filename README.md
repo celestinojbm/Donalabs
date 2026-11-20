@@ -92,6 +92,7 @@ donalabs/
 ├── design-system/        # shared UI component library + showcase app
 ├── proxy/                # optional Caddy reverse proxy (HTTPS)
 ├── scripts/             # generate-secrets, health, restore, proxy, lib, ...
+├── tests/               # script tests (run.sh, *.test.sh, fakes/docker)
 ├── backups/             # timestamped backups (git-ignored)
 ├── docs/                # architecture, consuming, security
 ├── .github/workflows/    # CI: ci.yml (entry + "CI OK" gate), design-system.yml, infra.yml
@@ -110,7 +111,7 @@ donalabs/
 | Start all (or a subset) | `./start.sh` · `./start.sh n8n vaultwarden` |
 | Stop (keep data) | `./stop.sh` · `./stop.sh --down` (remove containers, keep volumes) |
 | Update to pinned tags | `./update.sh` (backs up first, then pulls + recreates) |
-| Back up | `./backup.sh` · `./backup.sh --consistent` (brief downtime, crash-consistent) |
+| Back up | `./backup.sh` · `--consistent` (brief downtime, crash-consistent) · `--allow-partial` (subset of the stack) |
 | Restore | `./scripts/restore.sh backups/<timestamp>` |
 | Health check | `./scripts/health.sh` |
 | Reverse proxy (HTTPS) | `./scripts/proxy.sh up` · `down` · `validate` |
@@ -126,7 +127,18 @@ release notes, then run `./update.sh <service>`.
 (Vaultwarden, Open WebUI, n8n, Penpot assets, Plausible app data, ClickHouse
 events), and a copy of `.env` (which holds the encryption keys required to read
 the restored data — **keep backups private**). Old backups beyond
-`BACKUP_RETENTION` (default 7) are pruned. Schedule it with cron:
+`BACKUP_RETENTION` (default 7, integer ≥ 1) are pruned.
+
+A backup is **complete** only if every database and volume was captured.
+If a container is not running, a volume is missing, or a `pg_dump`/`tar`
+fails, `MANIFEST.txt` ends in `STATUS: INCOMPLETE`, the script exits **1**, and
+**old backups are not pruned**. Retention counts only complete backups. Without
+this, a stack left stopped would rotate every good backup away while cron
+reported success. If you deliberately run only part of the stack, use
+`./backup.sh --allow-partial` to accept missing components (real dump/tar errors
+still fail).
+
+Schedule it with cron:
 
 ```bash
 0 3 * * *  cd /path/to/donalabs && ./backup.sh >> backups/backup.log 2>&1
@@ -148,7 +160,7 @@ run, and a final always-on job, **`CI OK`**, aggregates the result.
 |---|---|---|---|
 | **route changes** | `ci.yml` + `.github/ci/changed-areas.sh` | tests + ShellCheck for the CI scripts themselves (`tests/ci.test.sh`), then decides which areas run | always |
 | **Design System** | `design-system.yml` (reusable) | `pnpm install --frozen-lockfile`, then `pnpm typecheck`, `pnpm lint`, `pnpm build` for the monorepo | `design-system/**` |
-| **Infrastructure** | `infra.yml` (reusable) | `docker compose config` for the root + every service + the proxy; every helper script is executable; ShellCheck on all scripts | `services/**`, `proxy/**`, `scripts/**`, `tests/**`, `docker-compose.yml`, a root `*.sh`, or `.env.example` |
+| **Infrastructure** | `infra.yml` (reusable) | `docker compose config` for the root + every service + the proxy; every helper script is executable; ShellCheck on all scripts; script tests (`tests/run.sh`) | `services/**`, `proxy/**`, `scripts/**`, `tests/**`, `docker-compose.yml`, a root `*.sh`, or `.env.example` |
 | **CI OK** | `ci.yml` + `.github/ci/gate.sh` | fails unless routing succeeded, every selected area passed and every other area was skipped | always |
 
 **Make `CI OK` the only required status check** (Settings → Branches → branch
@@ -184,7 +196,8 @@ pnpm install --frozen-lockfile && pnpm typecheck && pnpm lint && pnpm build
 docker compose config -q                            # root (include of all services)
 for f in services/*/docker-compose.yml; do (cd "$(dirname "$f")" && docker compose --env-file "$OLDPWD/.env" config -q); done
 docker compose -f proxy/docker-compose.yml --env-file .env config -q
-shellcheck --severity=warning --external-sources start.sh stop.sh update.sh backup.sh scripts/*.sh services/ytdlp/ytdlp.sh
+shellcheck --severity=warning --external-sources start.sh stop.sh update.sh backup.sh scripts/*.sh services/ytdlp/ytdlp.sh tests/*.sh tests/fakes/docker
+./tests/run.sh                                      # script tests (fake docker, no daemon)
 
 # CI routing + gate (from repo root)
 bash tests/ci.test.sh

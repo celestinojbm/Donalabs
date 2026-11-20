@@ -94,7 +94,7 @@ donalabs/
 ├── scripts/             # generate-secrets, health, restore, proxy, lib, ...
 ├── backups/             # timestamped backups (git-ignored)
 ├── docs/                # architecture, consuming, security
-├── .github/workflows/    # CI: design-system.yml, infra.yml
+├── .github/workflows/    # CI: ci.yml (entry + "CI OK" gate), design-system.yml, infra.yml
 ├── .env.example         # the configuration contract
 ├── docker-compose.yml   # root orchestration (Compose include)
 ├── start.sh  stop.sh  update.sh  backup.sh
@@ -136,17 +136,34 @@ the restored data — **keep backups private**). Old backups beyond
 
 ## Continuous Integration (CI)
 
-Two GitHub Actions workflows (in `.github/workflows/`) keep the repository
-stable. Both are **validation-only** — they never start a service, pull an
+GitHub Actions (in `.github/workflows/`) keep the repository stable. Every check
+is **validation-only** — they never start a service, pull an
 image, or need secrets — so they're fast and safe to run on every change.
 
-| Workflow | File | What it checks | Runs when |
-|---|---|---|---|
-| **Design System CI** | `design-system.yml` | `pnpm install --frozen-lockfile`, then `pnpm typecheck`, `pnpm lint`, `pnpm build` for the monorepo | changes under `design-system/**` |
-| **Infrastructure Validation** | `infra.yml` | `docker compose config` for the root + every service + the proxy; every helper script is executable; ShellCheck on all scripts | changes under `services/**`, `proxy/**`, `scripts/**`, `docker-compose.yml`, `*.sh`, or `.env.example` |
+Every pull request runs **one entry workflow, `ci.yml`**, with no path filter.
+Its first job routes the changed files to the areas below, the affected areas
+run, and a final always-on job, **`CI OK`**, aggregates the result.
 
-Each workflow only runs when files in its area change (path-filtered), and
-superseded runs on the same branch are cancelled automatically.
+| Job | File | What it checks | Runs when the PR touches |
+|---|---|---|---|
+| **route changes** | `ci.yml` + `.github/ci/changed-areas.sh` | tests + ShellCheck for the CI scripts themselves (`tests/ci.test.sh`), then decides which areas run | always |
+| **Design System** | `design-system.yml` (reusable) | `pnpm install --frozen-lockfile`, then `pnpm typecheck`, `pnpm lint`, `pnpm build` for the monorepo | `design-system/**` |
+| **Infrastructure** | `infra.yml` (reusable) | `docker compose config` for the root + every service + the proxy; every helper script is executable; ShellCheck on all scripts | `services/**`, `proxy/**`, `scripts/**`, `tests/**`, `docker-compose.yml`, a root `*.sh`, or `.env.example` |
+| **CI OK** | `ci.yml` + `.github/ci/gate.sh` | fails unless routing succeeded, every selected area passed and every other area was skipped | always |
+
+**Make `CI OK` the only required status check** (Settings → Branches → branch
+protection for `main` → *Require status checks* → `CI OK`). Don't require the
+area jobs: they are skipped when unaffected, and a docs-only PR must still be
+mergeable. `CI OK` fails if a selected area failed or was cancelled, or if the
+routing itself broke.
+
+Changing `ci.yml` or anything in `.github/ci/` runs **every** area. If the diff
+range can't be computed (manual run, first push of a branch, force-push), every
+area runs too: skipping is only ever a positive decision. Files outside every
+area (README, `docs/`, a brand-new top-level folder) run nothing; the run
+summary lists them so a new folder that needs validation is noticed and routed
+in `changed-areas.sh`. Superseded PR runs are cancelled; `main` and merge-queue
+runs are not.
 
 **How infra validation stays hermetic:** `docker compose config` is a
 client-side parse — it validates and interpolates the compose files (including
@@ -166,6 +183,9 @@ docker compose config -q                            # root (include of all servi
 for f in services/*/docker-compose.yml; do (cd "$(dirname "$f")" && docker compose --env-file "$OLDPWD/.env" config -q); done
 docker compose -f proxy/docker-compose.yml --env-file .env config -q
 shellcheck --severity=warning --external-sources start.sh stop.sh update.sh backup.sh scripts/*.sh services/ytdlp/ytdlp.sh
+
+# CI routing + gate (from repo root)
+bash tests/ci.test.sh
 ```
 
 ShellCheck gates on **warning** and **error** severity; `info`/`style` notes are

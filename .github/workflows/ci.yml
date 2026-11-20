@@ -14,14 +14,25 @@ name: CI
 
 on:
   pull_request:
+    # `edited` covers a base-branch change: status checks are tied to the head
+    # SHA, so retargeting a PR (e.g. feature-x -> main) would otherwise keep a
+    # green "CI OK" computed against the OLD base, while the diff against the
+    # new base may touch areas that never ran. Title/body edits also re-run;
+    # that is deliberate: skipping the jobs instead would publish a *skipped*
+    # "CI OK" for the same SHA, and skipped counts as passing.
+    types: [opened, synchronize, reopened, edited]
   push:
     branches: [main]
   merge_group:
   workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
-  # Supersede stale PR runs; never cancel main or merge-queue runs.
+  # Supersede stale PR runs. Every other event gets a group of its own: with a
+  # shared group (e.g. `ci-refs/heads/main`), GitHub CANCELS any run that is
+  # still pending when a newer one queues, even with cancel-in-progress: false.
+  # The next push run then diffs from that commit onwards, so the cancelled
+  # commit's changes would never be validated on main.
+  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || format('ci-run-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:

@@ -163,7 +163,9 @@ area runs too: skipping is only ever a positive decision. Files outside every
 area (README, `docs/`, a brand-new top-level folder) run nothing; the run
 summary lists them so a new folder that needs validation is noticed and routed
 in `changed-areas.sh`. Superseded PR runs are cancelled; `main` and merge-queue
-runs are not.
+runs never are (each gets its own concurrency group, so no commit on `main` goes
+unvalidated). Changing a PR's base branch (or its title/body) re-runs CI, so a
+green `CI OK` never refers to an old base.
 
 **How infra validation stays hermetic:** `docker compose config` is a
 client-side parse — it validates and interpolates the compose files (including

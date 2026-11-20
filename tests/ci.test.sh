@@ -117,5 +117,37 @@ eq "unrequired area that ran ok -> pass"           "$(gate success false success
 eq "all inputs missing -> fail"                    "$(gate '' '' '' '' '')"                      1
 
 echo
+echo "ci.yml: workflow invariants the gate relies on"
+# Pure bash on purpose (the runner's yq flavour and PyYAML availability are not
+# guaranteed). The checks read only simple, single-line keys of ci.yml.
+CI_YML="$REPO/.github/workflows/ci.yml"
+# top <key>: lines of a top-level mapping, up to the next top-level key.
+top() { awk -v k="$1:" '$0==k || index($0,k" ")==1 {on=1; print; next} on && /^[^ #]/ {exit} on {print}' "$CI_YML"; }
+# job <id>: lines of jobs.<id>, up to the next job.
+job() { awk -v k="  $1:" '$0==k {on=1; next} on && /^  [^ #]/ {exit} on && /^[^ #]/ {exit} on {print}' "$CI_YML"; }
+ON="$(top on)"
+PR_TRIGGER="$(awk '/^  pull_request:/ {on=1; next} on && /^  [^ #]/ {exit} on {print}' <<< "$ON")"
+if grep -Eq '^\s+(paths|paths-ignore|branches|branches-ignore):' <<< "$PR_TRIGGER"; then
+  fail "pull_request has no path/branch filter" "a filter would leave 'CI OK' pending (or absent) on some PRs"
+else pass "pull_request has no path/branch filter"; fi
+PR_TYPES="$(sed -n 's/^ *types: *\[\(.*\)\].*/\1/p' <<< "$PR_TRIGGER" | tr -d ' ')"
+for t in opened synchronize reopened edited; do
+  if [[ ",$PR_TYPES," == *",$t,"* ]]; then pass "pull_request re-runs on '$t'"
+  else fail "pull_request re-runs on '$t'" "types=[$PR_TYPES]"; fi
+done
+GROUP="$(top concurrency | sed -n 's/^ *group: *//p')"
+if [[ "$GROUP" == *"github.run_id"* && "$GROUP" == *"github.event_name == 'pull_request'"* ]]; then
+  pass "only PR runs share a concurrency group (push/merge_group never superseded)"
+else fail "only PR runs share a concurrency group (push/merge_group never superseded)" "group: $GROUP"; fi
+if job ci-ok | grep -Eq '^ +if: *always\(\) *$'; then pass "CI OK runs with if: always()"
+else fail "CI OK runs with if: always()"; fi
+GATE_NEEDS="$(job ci-ok | sed -n 's/^ *needs: *\[\(.*\)\].*/\1/p' | tr -d ' ')"
+for j in $(awk '/^jobs:/ {on=1; next} on && /^  [a-z][a-z0-9_-]*:/ {sub(/:.*/,""); sub(/^ +/,""); print}' "$CI_YML"); do
+  [ "$j" = ci-ok ] && continue
+  if [[ ",$GATE_NEEDS," == *",$j,"* ]]; then pass "CI OK needs '$j'"
+  else fail "CI OK needs '$j'" "a job missing from needs is invisible to the gate"; fi
+done
+
+echo
 echo "ci.test.sh: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

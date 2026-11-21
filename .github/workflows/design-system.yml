@@ -1,23 +1,12 @@
 name: Design System CI
 
 # Typechecks, lints, and builds the design-system monorepo (apps/showcase +
-# packages/ui). Runs on any change under design-system/ (or to this workflow).
+# packages/ui). Called by ci.yml when a change touches design-system/** (or this
+# file); routing and concurrency live there. Can also be run by hand.
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "design-system/**"
-      - ".github/workflows/design-system.yml"
-  pull_request:
-    paths:
-      - "design-system/**"
-      - ".github/workflows/design-system.yml"
-
-# One in-flight run per ref; cancel superseded runs to save minutes.
-concurrency:
-  group: design-system-${{ github.ref }}
-  cancel-in-progress: true
+  workflow_call:
+  workflow_dispatch:
 
 permissions:
   contents: read

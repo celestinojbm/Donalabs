@@ -1,0 +1,107 @@
+name: CI
+
+# Single entry point for every PR. Runs on ALL pull requests (no path filter),
+# routes the change to the validation areas it touches, and ends in one
+# always-on job, "CI OK", that is safe to mark as the required status check.
+#
+# Why an aggregator: a path-filtered workflow that does not run leaves its
+# check "pending" forever, so it can't be required. Here the area workflows
+# are only *skipped* when unaffected, and "CI OK" decides — it fails if a
+# required area failed, was cancelled, or the routing itself broke.
+#
+# Routing logic: .github/ci/changed-areas.sh · verdict: .github/ci/gate.sh
+# Tests for both: tests/ci.test.sh (run in the `changes` job on every PR).
+
+on:
+  pull_request:
+    # `edited` covers a base-branch change: status checks are tied to the head
+    # SHA, so retargeting a PR (e.g. feature-x -> main) would otherwise keep a
+    # green "CI OK" computed against the OLD base, while the diff against the
+    # new base may touch areas that never ran. Title/body edits also re-run;
+    # that is deliberate: skipping the jobs instead would publish a *skipped*
+    # "CI OK" for the same SHA, and skipped counts as passing.
+    types: [opened, synchronize, reopened, edited]
+  push:
+    branches: [main]
+  merge_group:
+  workflow_dispatch:
+
+concurrency:
+  # Supersede stale PR runs. Every other event gets a group of its own: with a
+  # shared group (e.g. `ci-refs/heads/main`), GitHub CANCELS any run that is
+  # still pending when a newer one queues, even with cancel-in-progress: false.
+  # The next push run then diffs from that commit onwards, so the cancelled
+  # commit's changes would never be validated on main.
+  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || format('ci-run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    name: route changes
+    runs-on: ubuntu-latest
+    outputs:
+      design_system: ${{ steps.route.outputs.design_system }}
+      infra: ${{ steps.route.outputs.infra }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # Full history so the three-dot diff can find the merge base. The
+          # repo is small; a shallow clone would make every diff fall back to
+          # "run everything".
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The router decides what may be skipped, so it is tested and linted
+      # before it is trusted. Pure bash, ~1s.
+      - name: Test CI scripts
+        run: |
+          shellcheck --severity=warning .github/ci/*.sh tests/ci.test.sh
+          bash tests/ci.test.sh
+
+      - name: Route changed files to areas
+        id: route
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+        run: .github/ci/changed-areas.sh
+
+  design-system:
+    name: Design System
+    needs: changes
+    if: needs.changes.outputs.design_system == 'true'
+    uses: ./.github/workflows/design-system.yml
+
+  infra:
+    name: Infrastructure
+    needs: changes
+    if: needs.changes.outputs.infra == 'true'
+    uses: ./.github/workflows/infra.yml
+
+  ci-ok:
+    # >>> Mark THIS check ("CI OK") as required in branch protection. <<<
+    name: CI OK
+    needs: [changes, design-system, infra]
+    # always(), not !cancelled(): a skipped job reports as passing, so the gate
+    # must run (and fail) even when the run is cancelled.
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: .github/ci
+          persist-credentials: false
+
+      - name: Verdict
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          DS_NEEDED: ${{ needs.changes.outputs.design_system }}
+          DS_RESULT: ${{ needs.design-system.result }}
+          INFRA_NEEDED: ${{ needs.changes.outputs.infra }}
+          INFRA_RESULT: ${{ needs.infra.result }}
+        run: .github/ci/gate.sh

@@ -3,31 +3,14 @@ name: Infrastructure Validation
 # Validates the Docker Compose infrastructure and helper scripts WITHOUT starting
 # any service or pulling any image: `docker compose config` is a client-side parse
 # (no daemon needed), so this stays fast and hermetic.
+#
+# Called by ci.yml when a change touches services/**, proxy/**, scripts/**,
+# tests/**, docker-compose.yml, a root *.sh, .env.example or this file; routing
+# and concurrency live there. Can also be run by hand.
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "services/**"
-      - "proxy/**"
-      - "scripts/**"
-      - "docker-compose.yml"
-      - "*.sh"
-      - ".env.example"
-      - ".github/workflows/infra.yml"
-  pull_request:
-    paths:
-      - "services/**"
-      - "proxy/**"
-      - "scripts/**"
-      - "docker-compose.yml"
-      - "*.sh"
-      - ".env.example"
-      - ".github/workflows/infra.yml"
-
-concurrency:
-  group: infra-${{ github.ref }}
-  cancel-in-progress: true
+  workflow_call:
+  workflow_dispatch:
 
 permissions:
   contents: read

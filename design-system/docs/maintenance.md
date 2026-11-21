@@ -85,7 +85,9 @@ binary, a codegen step), add it to that list and re-run install — don't run
 ## Continuous integration
 
 The **Design System CI** workflow (`.github/workflows/design-system.yml` at the
-repo root) runs on every change under `design-system/**`:
+repo root) is a reusable workflow. The root `ci.yml` calls it on every PR that
+changes `design-system/**`; its result feeds the required `CI OK` check (see the
+root README, "Continuous Integration"). It runs:
 
 ```
 pnpm install --frozen-lockfile   # in design-system/, fails on a stale lockfile

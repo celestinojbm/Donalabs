@@ -25,6 +25,7 @@ fail() { FAIL=$((FAIL+1)); printf '  FAIL  %s\n' "$1"; [ -z "${2:-}" ] || printf
 check() { local name="$1"; shift; if "$@"; then pass "$name"; else fail "$name" "command: $*"; fi; }
 # Report a list of offending keys (empty list = pass).
 check_none() { if [ -z "$2" ]; then pass "$1"; else fail "$1" "keys:$2"; fi; }
+skip() { printf '  skip  %s\n' "$1"; }
 not() { ! "$@"; }
 
 SANDBOXES=()
@@ -41,8 +42,9 @@ new_sandbox() {
   E="$SB/.env"
 }
 
-# Run the script inside the sandbox. Its mktemp lands in $SB/tmp so a leftover
-# temp file (which would hold secrets) is detectable and never escapes.
+# Run the script inside the sandbox. It writes its temp file next to .env; TMPDIR
+# also points into the sandbox, so no stray temp file (which would hold
+# secrets) can escape it.
 #   run_gen [PATH-override]
 run_gen() {
   set +e
@@ -68,14 +70,16 @@ minimal_path() {
   done
   printf '%s' "$SB/bin"
 }
-BASE_TOOLS=(bash dirname cp mktemp cat rm chmod tr)
+BASE_TOOLS=(bash dirname mktemp cat rm chmod mv tr id stat chown readlink)
 
 file_mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }   # GNU || BSD/macOS
 
-# Value of KEY in a .env file, with one layer of surrounding quotes stripped.
+# Value of KEY in a .env file (CR, an `export` prefix and one layer of quotes
+# stripped).
 env_val() {
   local v
-  v="$(sed -n "s/^$1=//p" "$2" | head -1)"
+  v="$(sed -nE "s/^[[:space:]]*(export[[:space:]]+)?$1=//p" "$2" | head -1)"
+  v="${v%$'\r'}"
   v="${v%\'}"; v="${v#\'}"; v="${v%\"}"; v="${v#\"}"
   printf '%s' "$v"
 }
@@ -106,9 +110,9 @@ format_ok() {
     "gen_hex "*) n="${spec#gen_hex }"; [[ $v =~ $HEX_RE ]] && [ "${#v}" -eq $((2*n)) ] ;;
     "gen_b64 "*) n="${spec#gen_b64 }"; [[ $v =~ $B64_RE ]] && [ "${#v}" -eq $((4*((n+2)/3))) ] ;;
     gen_penpot_key)
-      # secrets.token_urlsafe(64) -> 86 url-safe chars; fallback gen_b64 48 -> 64.
+      # secrets.token_urlsafe(64) -> 86 url-safe chars; fallback gen_b64 64 -> 88.
       if [ "$3" = yes ]; then [[ $v =~ $URLSAFE86_RE ]]
-      else [[ $v =~ $B64_RE ]] && [ "${#v}" -eq 64 ]; fi ;;
+      else [[ $v =~ $B64_RE ]] && [ "${#v}" -eq 88 ]; fi ;;
     *) return 1 ;;
   esac
 }
@@ -143,7 +147,32 @@ leaked_in_output() {
   done
   printf '%s' "$bad"
 }
-no_temp_left() { [ -z "$(ls -A "$SB/tmp")" ]; }
+no_temp_left() { [ -z "$(ls -A "$SB/tmp")" ] && ! compgen -G "$SB/.env.tmp.*" >/dev/null; }
+
+# Generator the template DOCUMENTS for KEY, from the "GENERATE with: ..."
+# comment block right above it, translated to the script's spec syntax:
+#   openssl rand -hex N -> gen_hex N, openssl rand -base64 N -> gen_b64 N,
+#   secrets.token_urlsafe(64) -> gen_penpot_key. Empty if undocumented.
+documented_generator() {
+  awk -v key="$1" '
+    /^#/ {
+      if (match($0, /openssl rand -(hex|base64) [0-9]+/)) {
+        split(substr($0, RSTART, RLENGTH), a, " ")
+        doc = (a[3] == "-hex" ? "gen_hex " : "gen_b64 ") a[4]
+      } else if ($0 ~ /token_urlsafe\(64\)/) doc = "gen_penpot_key"
+      next
+    }
+    { if (index($0, key "=") == 1) { print doc; exit } ; doc = "" }
+  ' "$EXAMPLE"
+}
+# Keys whose script generator differs from (or lacks) the documented one. This
+# is what pins strength: weakening a generator means changing the documented
+# command in .env.example too, in the same reviewed diff.
+undocumented_or_drifted() {
+  local k bad=""
+  for k in $SS; do [ "$(generator_of "$k")" = "$(documented_generator "$k")" ] || bad="$bad $k"; done
+  printf '%s' "$bad"
+}
 
 # Fingerprint of the real .env (mode + CRC, never the content) to prove the
 # test leaves it alone. In CI it exists: infra.yml generates it before tests.
@@ -173,8 +202,11 @@ while IFS= read -r line; do
   case "$v" in GENERATE|"'GENERATE'"|'"GENERATE"'|""|"''"|'""') ;; *) committed="$committed $k" ;; esac
 done < <(grep -E '^[A-Z0-9_]*(PASSWORD|SECRET|TOKEN|_KEY|KEY_BASE)=' "$EXAMPLE")
 check_none ".env.example holds no real credential" "$committed"
+check_none "every generator matches the command documented in .env.example" "$(undocumented_or_drifted)"
 if git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   check ".env is git-ignored" git -C "$REPO" check-ignore -q .env
+  # A leftover temp file (e.g. after kill -9) holds secrets too.
+  check ".env temp files are git-ignored" git -C "$REPO" check-ignore -q .env.tmp.AbC123
   check ".env.example is NOT git-ignored" not git -C "$REPO" check-ignore -q .env.example
 fi
 
@@ -273,10 +305,173 @@ check "missing openssl creates no .env" [ ! -e "$E" ]
 new_sandbox
 run_gen "$(minimal_path "${BASE_TOOLS[@]}" openssl)"
 check "no-python3 run exits 0" [ "$RC" -eq 0 ]
-check "no-python3: PENPOT_SECRET_KEY uses the base64 fallback" format_ok PENPOT_SECRET_KEY "$E" no
+check "no-python3: PENPOT_SECRET_KEY uses the 64-byte base64 fallback" format_ok PENPOT_SECRET_KEY "$E" no
 check_none "no-python3: every secret matches its format" "$(bad_formats "$E" no)"
 
-# --- 7. the real .env was never touched ------------------------------------------
+# --- 7. CRLF .env (edited on Windows): filled, line endings kept --------------
+# Before the fix, "KEY=GENERATE\r" did not match and the literal GENERATE stayed
+# as the password while the script reported success.
+new_sandbox
+sed 's/$/\r/' "$EXAMPLE" > "$E"
+run_gen
+check "CRLF run exits 0" [ "$RC" -eq 0 ]
+check "CRLF: no GENERATE value left" not grep -qE $'^[A-Z0-9_]+=[\'"]?GENERATE[\'"]?\r?$' "$E"
+check_none "CRLF: every secret matches its format" "$(bad_formats "$E" "$HAS_PY")"
+check "CRLF: every line still ends in CRLF" [ "$(grep -c $'\r$' "$E")" -eq "$(wc -l < "$E")" ]
+check "CRLF: VW_ADMIN_TOKEN still single-quoted" grep -qE $'^VW_ADMIN_TOKEN=\'[^\']+\'\r$' "$E"
+check "CRLF: says the line endings were kept" grep -q "CRLF line endings" <<< "$OUT"
+cp "$E" "$SB/first"; run_gen
+check "CRLF: second run is byte-identical" cmp -s "$E" "$SB/first"
+
+# --- 8. `export KEY=` and indented lines: filled, prefix kept -----------------
+new_sandbox
+sed -e 's/^N8N_DB_PASSWORD=GENERATE$/export N8N_DB_PASSWORD=GENERATE/' \
+    -e 's/^N8N_ENCRYPTION_KEY=GENERATE$/  N8N_ENCRYPTION_KEY=GENERATE/' \
+    -e "s/^VW_ADMIN_TOKEN='GENERATE'\$/export VW_ADMIN_TOKEN='GENERATE'/" \
+    "$EXAMPLE" > "$E"
+run_gen
+check "export/indent run exits 0" [ "$RC" -eq 0 ]
+check "export prefix kept and value filled" grep -qE '^export N8N_DB_PASSWORD=[0-9a-f]{48}$' "$E"
+check "indentation kept and value filled" grep -qE '^  N8N_ENCRYPTION_KEY=[0-9a-f]{64}$' "$E"
+check "export + single quotes kept" grep -qE "^export VW_ADMIN_TOKEN='[^']+'\$" "$E"
+check_none "export/indent: every secret matches its format" "$(bad_formats "$E" "$HAS_PY")"
+
+# --- 9. fail closed: a GENERATE the script cannot fill aborts, .env untouched --
+# Each case would otherwise ship the literal "GENERATE" as a password.
+# shellcheck disable=SC2016  # literal '$' in values and sed scripts on purpose
+fail_closed_case() {  # label sed-expr key
+  new_sandbox
+  cp "$EXAMPLE" "$E"
+  printf 'CALCOM_SMTP_PASSWORD=user$secret\n' >> "$E"   # a user value that must not be echoed
+  sed -i.bak "$2" "$E"; rm -f "$E.bak"
+  cp "$E" "$SB/before"; chmod 644 "$E"; chmod 644 "$SB/before"
+  run_gen
+  check "$1: exits non-zero" [ "$RC" -ne 0 ]
+  check "$1: names the key" grep -q "GENERATE left for: .*$3" <<< "$OUT"
+  check "$1: .env left byte-identical" cmp -s "$E" "$SB/before"
+  check "$1: no temp file left behind" no_temp_left
+  check "$1: does not echo user values" not grep -qF 'user$secret' <<< "$OUT"
+}
+# shellcheck disable=SC2016
+fail_closed_case "unknown key"    '$a\
+OLD_SERVICE_PASSWORD=GENERATE' OLD_SERVICE_PASSWORD
+fail_closed_case "spaces around =" 's/^N8N_DB_PASSWORD=GENERATE$/N8N_DB_PASSWORD = GENERATE/' N8N_DB_PASSWORD
+fail_closed_case "inline comment"  's/^N8N_DB_PASSWORD=GENERATE$/N8N_DB_PASSWORD=GENERATE # todo/' N8N_DB_PASSWORD
+
+new_sandbox
+printf 'NEW_SERVICE_TOKEN=GENERATE\n' >> "$SB/.env.example"
+run_gen
+check "template GENERATE without generator: exits non-zero" [ "$RC" -ne 0 ]
+check "template GENERATE without generator: creates no .env" [ ! -e "$E" ]
+
+# --- 10. atomic write: a failure mid-run never truncates .env ----------------
+# Before the fix, `cat "$TMP" > .env` emptied the file before rewriting it: a
+# full disk or a crash lost every existing key (N8N_ENCRYPTION_KEY included).
+# Here openssl dies on its 3rd call, after some secrets were already generated.
+# Prints a PATH whose openssl fails from call N on (calls counted in the sandbox).
+failing_openssl_path() {
+  mkdir -p "$SB/fakebin"
+  cat > "$SB/fakebin/openssl" <<FAKE
+#!/usr/bin/env bash
+n=\$(( \$(cat "$SB/openssl.calls" 2>/dev/null || echo 0) + 1 ))
+echo "\$n" > "$SB/openssl.calls"
+[ "\$n" -lt $1 ] || exit 1
+exec "$(command -v openssl)" "\$@"
+FAKE
+  chmod +x "$SB/fakebin/openssl"
+  printf '%s' "$SB/fakebin:$PATH"
+}
+new_sandbox
+sed 's/^CALCOM_DB_PASSWORD=GENERATE$/CALCOM_DB_PASSWORD=keep-me/' "$EXAMPLE" > "$E"
+chmod 600 "$E"; cp -p "$E" "$SB/before"
+run_gen "$(failing_openssl_path 3)"
+check "generator failure: exits non-zero" [ "$RC" -ne 0 ]
+check "generator failure: openssl really failed mid-run" [ "$(cat "$SB/openssl.calls")" -eq 3 ]
+check "generator failure: .env left byte-identical" cmp -s "$E" "$SB/before"
+check "generator failure: no temp file left behind" no_temp_left
+
+# The write itself must be a rename, never an in-place rewrite: a hard link to
+# the original .env must still hold the original bytes after a filling run.
+# An in-place `cat > .env` truncates that same inode first, so a crash or a
+# full disk in between leaves a partial file; a rename cannot.
+new_sandbox
+sed 's/^CALCOM_DB_PASSWORD=GENERATE$/CALCOM_DB_PASSWORD=keep-me/' "$EXAMPLE" > "$E"
+cp "$E" "$SB/before"; ln "$E" "$SB/old-inode"
+run_gen
+check "rename write: run exits 0" [ "$RC" -eq 0 ]
+check "rename write: original inode never rewritten" cmp -s "$SB/old-inode" "$SB/before"
+check "rename write: .env is a new file with the secrets" not cmp -s "$E" "$SB/before"
+check "rename write: user value kept" val_eq CALCOM_DB_PASSWORD keep-me
+
+# Fresh run with the same failure: no half-written .env appears.
+new_sandbox
+run_gen "$(failing_openssl_path 3)"
+check "fresh generator failure: exits non-zero" [ "$RC" -ne 0 ]
+check "fresh generator failure: creates no .env" [ ! -e "$E" ]
+check "fresh generator failure: no temp file left behind" no_temp_left
+
+# --- 11. symlinked .env: the target is updated, the link survives -------------
+new_sandbox
+mkdir -p "$SB/vault"
+cp "$EXAMPLE" "$SB/vault/real.env"
+ln -s vault/real.env "$E"
+run_gen
+check "symlink run exits 0" [ "$RC" -eq 0 ]
+check "symlink: .env is still a symlink" [ -L "$E" ]
+check "symlink: target filled" not grep -qE "^[A-Z0-9_]+=['\"]?GENERATE['\"]?$" "$SB/vault/real.env"
+check "symlink: target is mode 600" [ "$(file_mode "$SB/vault/real.env")" = "600" ]
+check "symlink: no temp file left behind" not compgen -G "$SB/vault/real.env.tmp.*"
+
+# --- 12. run as root: the file keeps its owner ---------------------------------
+if [ "$(id -u)" -eq 0 ]; then
+  new_sandbox
+  cp "$EXAMPLE" "$E"; chown 65534:65534 "$E"
+  run_gen
+  check "as root: exits 0" [ "$RC" -eq 0 ]
+  check "as root: owner preserved (65534:65534)" \
+    [ "$(stat -c %u:%g "$E" 2>/dev/null || stat -f %u:%g "$E")" = "65534:65534" ]
+else
+  skip "as root: owner preserved (not running as root)"
+fi
+
+# --- 13. edge cases of the atomic write ----------------------------------------
+# `.env` is a directory (what Docker creates when bind-mounting a missing file):
+# must fail, not rename the secrets into it and report success.
+new_sandbox
+mkdir "$E"
+run_gen
+check ".env directory: exits non-zero" [ "$RC" -ne 0 ]
+check ".env directory: nothing written inside it" [ -z "$(ls -A "$E")" ]
+check ".env directory: no temp file left behind" no_temp_left
+
+# The temp file must live next to .env, not in TMPDIR: a rename is only atomic
+# on one filesystem. An unusable TMPDIR must not matter.
+new_sandbox
+set +e
+OUT="$(TMPDIR="$SB/no-such-dir" "$SB/scripts/generate-secrets.sh" 2>&1)"; RC=$?
+set -e
+check "temp file next to .env: works with an unusable TMPDIR" [ "$RC" -eq 0 ]
+check "temp file next to .env: no GENERATE left" \
+  not grep -qE "^[A-Z0-9_]+=['\"]?GENERATE['\"]?$" "$E"
+
+# A run with nothing to fill still tightens a loose mode.
+chmod 644 "$E"; cp "$E" "$SB/before"
+run_gen
+check "no-op run: tightens 644 -> 600" [ "$(file_mode "$E")" = "600" ]
+check "no-op run: content unchanged" cmp -s "$E" "$SB/before"
+
+# A generator that "succeeds" with no output must not write an empty secret.
+new_sandbox
+mkdir -p "$SB/fakebin"
+printf '#!/bin/sh\nexit 0\n' > "$SB/fakebin/python3"; chmod +x "$SB/fakebin/python3"
+cp "$EXAMPLE" "$E"; cp "$E" "$SB/before"
+run_gen "$SB/fakebin:$PATH"
+check "empty generator output: exits non-zero" [ "$RC" -ne 0 ]
+check "empty generator output: names the key" grep -q 'PENPOT_SECRET_KEY produced an empty value' <<< "$OUT"
+check "empty generator output: .env left byte-identical" cmp -s "$E" "$SB/before"
+check "empty generator output: no temp file left behind" no_temp_left
+
+# --- 14. the real .env was never touched ------------------------------------------
 check "real .env untouched by this test" [ "$(real_env_fp)" = "$REAL_FP_BEFORE" ]
 
 echo "  $PASS passed, $FAIL failed"

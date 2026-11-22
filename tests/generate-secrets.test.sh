@@ -434,7 +434,44 @@ else
   skip "as root: owner preserved (not running as root)"
 fi
 
-# --- 13. the real .env was never touched ------------------------------------------
+# --- 13. edge cases of the atomic write ----------------------------------------
+# `.env` is a directory (what Docker creates when bind-mounting a missing file):
+# must fail, not rename the secrets into it and report success.
+new_sandbox
+mkdir "$E"
+run_gen
+check ".env directory: exits non-zero" [ "$RC" -ne 0 ]
+check ".env directory: nothing written inside it" [ -z "$(ls -A "$E")" ]
+check ".env directory: no temp file left behind" no_temp_left
+
+# The temp file must live next to .env, not in TMPDIR: a rename is only atomic
+# on one filesystem. An unusable TMPDIR must not matter.
+new_sandbox
+set +e
+OUT="$(TMPDIR="$SB/no-such-dir" "$SB/scripts/generate-secrets.sh" 2>&1)"; RC=$?
+set -e
+check "temp file next to .env: works with an unusable TMPDIR" [ "$RC" -eq 0 ]
+check "temp file next to .env: no GENERATE left" \
+  not grep -qE "^[A-Z0-9_]+=['\"]?GENERATE['\"]?$" "$E"
+
+# A run with nothing to fill still tightens a loose mode.
+chmod 644 "$E"; cp "$E" "$SB/before"
+run_gen
+check "no-op run: tightens 644 -> 600" [ "$(file_mode "$E")" = "600" ]
+check "no-op run: content unchanged" cmp -s "$E" "$SB/before"
+
+# A generator that "succeeds" with no output must not write an empty secret.
+new_sandbox
+mkdir -p "$SB/fakebin"
+printf '#!/bin/sh\nexit 0\n' > "$SB/fakebin/python3"; chmod +x "$SB/fakebin/python3"
+cp "$EXAMPLE" "$E"; cp "$E" "$SB/before"
+run_gen "$SB/fakebin:$PATH"
+check "empty generator output: exits non-zero" [ "$RC" -ne 0 ]
+check "empty generator output: names the key" grep -q 'PENPOT_SECRET_KEY produced an empty value' <<< "$OUT"
+check "empty generator output: .env left byte-identical" cmp -s "$E" "$SB/before"
+check "empty generator output: no temp file left behind" no_temp_left
+
+# --- 14. the real .env was never touched ------------------------------------------
 check "real .env untouched by this test" [ "$(real_env_fp)" = "$REAL_FP_BEFORE" ]
 
 echo "  $PASS passed, $FAIL failed"

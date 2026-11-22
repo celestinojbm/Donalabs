@@ -38,6 +38,9 @@ if [ -L "$ENV_FILE" ]; then
   target="$(readlink -f "$ENV_FILE" 2>/dev/null)" || die ".env is a symlink that cannot be resolved"
   ENV_FILE="$target"
 fi
+# Docker creates a DIRECTORY named .env when a bind mount points at a missing
+# file. Renaming into it would drop the secrets inside it and report success.
+[ ! -e "$ENV_FILE" ] || [ -f "$ENV_FILE" ] || die "$ENV_FILE exists but is not a regular file"
 
 CREATED=0
 if [ -f "$ENV_FILE" ]; then

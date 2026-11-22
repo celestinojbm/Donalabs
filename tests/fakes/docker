@@ -1,40 +1,93 @@
 #!/usr/bin/env bash
 # Fake `docker` for script tests. No daemon, no images: it simulates only the
-# calls backup.sh makes, driven by environment variables:
+# calls backup.sh and scripts/restore.sh make, driven by environment variables:
 #
-#   FAKE_RUNNING      space-separated container names reported by `docker ps`
-#   FAKE_VOLUMES      space-separated volume names that `volume inspect` finds
-#   FAKE_PGDUMP_FAIL  container whose `pg_dump` exits non-zero
-#   FAKE_TAR_FAIL     volume whose tar snapshot (`docker run`) exits non-zero
-#   FAKE_LOG          file every invocation is appended to (one line per call)
+#   FAKE_RUNNING       space-separated container names reported by `docker ps`
+#   FAKE_VOLUMES       space-separated volume names that `volume inspect` finds
+#   FAKE_VOLUME_USERS  `docker ps -a --filter volume=V` answers, as space-separated
+#                      "volume=container[,container...]" pairs
+#   FAKE_PGDUMP_FAIL   container whose `pg_dump` exits non-zero
+#   FAKE_TAR_FAIL      volume whose tar snapshot (`docker run`) exits non-zero
+#   FAKE_PSQL_FAIL     container whose `psql` restore exits non-zero
+#   FAKE_PSQL_DIR      if set, `docker exec -i C psql ...` saves its stdin to
+#                      $FAKE_PSQL_DIR/C.sql (what restore.sh piped into psql)
+#   FAKE_VOLROOT       if set, a volume V is the directory $FAKE_VOLROOT/V and the
+#                      `sh -c` of a `docker run` really runs (real tar, real rm)
+#                      with its /src, /dst and /backup mounts mapped to host dirs.
+#                      Unset: `docker run` only writes a placeholder tarball.
+#   FAKE_LOG           file every invocation is appended to (one line per call)
 set -euo pipefail
 
 [ -n "${FAKE_LOG:-}" ] && printf '%s\n' "$*" >> "$FAKE_LOG"
 
 in_list() { case " $2 " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
+# `docker run` with FAKE_VOLROOT: map the container paths in the shell command to
+# host directories and run it. Refuses anything it could not map, so a bad
+# mapping can never turn `rm -rf /dst/*` into a host-wide delete.
+run_mapped() {
+  local mount="$1" vol="$2" backup_dir="$3" cmd="$4" voldir
+  [ -n "$vol" ] && [ -n "$backup_dir" ] && [ -d "$FAKE_VOLROOT" ] \
+    || { echo "fake docker: cannot map run (vol='$vol' backup='$backup_dir')" >&2; exit 1; }
+  voldir="$FAKE_VOLROOT/$vol"
+  mkdir -p "$voldir"
+  # Volume path first: the backup dir path contains "/backups", never "/dst".
+  cmd="${cmd//\/$mount/$voldir}"
+  cmd="${cmd//\/backup\//$backup_dir/}"
+  if [[ " $cmd " =~ [[:space:]]/(src|dst|backup)(/|[[:space:]]) ]]; then
+    echo "fake docker: unmapped container path in: $cmd" >&2; exit 1
+  fi
+  sh -c "$cmd"
+}
+
 case "${1:-}" in
   info) exit 0 ;;
   compose) [ "${2:-}" = "version" ] && { echo "Docker Compose version v2-fake"; exit 0; }; exit 0 ;;
   ps)
-    for c in ${FAKE_RUNNING:-}; do echo "$c"; done ;;
+    # One printf = one write: a reader that exits early (grep -q) cannot SIGPIPE
+    # the fake halfway through and turn "running" into "not running".
+    filter=""
+    for a in "$@"; do case "$a" in volume=*) filter="${a#volume=}" ;; esac; done
+    if [ -n "$filter" ]; then
+      for pair in ${FAKE_VOLUME_USERS:-}; do
+        [ "${pair%%=*}" = "$filter" ] || continue
+        users="${pair#*=}"
+        # shellcheck disable=SC2086  # split the comma list into one name per line
+        printf '%s\n' ${users//,/ }
+      done
+      exit 0
+    fi
+    # shellcheck disable=SC2086  # word splitting of the name list is the point
+    [ -z "${FAKE_RUNNING:-}" ] || printf '%s\n' $FAKE_RUNNING ;;
   exec)
-    container="$2"
+    shift
+    interactive=0
+    [ "${1:-}" = "-i" ] && { interactive=1; shift; }
+    container="$1"
+    if [ "$interactive" -eq 1 ]; then
+      input="$(cat)"   # always drain stdin, like a real psql would
+      [ "$container" = "${FAKE_PSQL_FAIL:-}" ] && { echo "psql: error" >&2; exit 1; }
+      [ -z "${FAKE_PSQL_DIR:-}" ] || printf '%s\n' "$input" > "$FAKE_PSQL_DIR/$container.sql"
+      exit 0
+    fi
     if [ "$container" = "${FAKE_PGDUMP_FAIL:-}" ]; then echo "pg_dump: error" >&2; exit 1; fi
     echo "-- fake dump of $container" ;;
   volume)
     [ "${2:-}" = "inspect" ] || exit 1
     in_list "$3" "${FAKE_VOLUMES:-}" ;;
   run)
-    vol="" backup_dir="" last=""
+    vol="" mount="" backup_dir="" last=""
     for a in "$@"; do
       case "$a" in
-        *:/src:ro) vol="${a%%:/src:ro}" ;;
-        *:/backup) backup_dir="${a%%:/backup}" ;;
+        *:/src:ro)    vol="${a%%:/src:ro}"; mount=src ;;
+        *:/dst)       vol="${a%%:/dst}"; mount=dst ;;
+        *:/backup:ro) backup_dir="${a%%:/backup:ro}" ;;
+        *:/backup)    backup_dir="${a%%:/backup}" ;;
       esac
       last="$a"
     done
     [ "$vol" = "${FAKE_TAR_FAIL:-}" ] && { echo "tar: error" >&2; exit 1; }
+    if [ -n "${FAKE_VOLROOT:-}" ]; then run_mapped "$mount" "$vol" "$backup_dir" "$last"; exit $?; fi
     name="$(sed -n 's#.*tar czf /backup/\([^ ]*\).*#\1#p' <<< "$last")"
     [ -n "$backup_dir" ] && [ -n "$name" ] || { echo "fake docker: unexpected run: $*" >&2; exit 1; }
     echo "fake tar of $vol" > "$backup_dir/$name" ;;

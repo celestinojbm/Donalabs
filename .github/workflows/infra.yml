@@ -86,6 +86,7 @@ jobs:
       - name: Script tests
         # Behavioural tests for the helper scripts (backup.sh completeness,
         # exit codes, retention safety; generate-secrets.sh contract with
-        # .env.example, formats, idempotency). They use tests/fakes/docker and
+        # .env.example, formats, idempotency; restore.sh guards and a real
+        # backup -> restore round trip). They use tests/fakes/docker and
         # throwaway sandboxes, so no Docker daemon is needed and nothing is pulled.
         run: ./tests/run.sh

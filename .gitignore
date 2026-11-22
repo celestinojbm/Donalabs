@@ -4,6 +4,8 @@
 .env.local
 *.env
 !.env.example
+# Temp file generate-secrets.sh renames over .env (left only if killed -9).
+.env.tmp.*
 secrets/
 **/secrets/
 

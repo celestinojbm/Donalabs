@@ -12,7 +12,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
 
 ALL_PG="donalabs-calcom-db donalabs-plausible-db donalabs-penpot-db donalabs-n8n-db"
-ALL_APPS="donalabs-vaultwarden donalabs-open-webui donalabs-n8n donalabs-plausible donalabs-penpot-backend"
+ALL_APPS="donalabs-vaultwarden donalabs-open-webui donalabs-n8n donalabs-plausible donalabs-plausible-clickhouse donalabs-penpot-backend donalabs-penpot-frontend"
 ALL_VOLS="donalabs_vaultwarden_data donalabs_open_webui_data donalabs_n8n_data donalabs_penpot_assets donalabs_plausible_data donalabs_plausible_event_data"
 # Which containers mount each volume (what `docker ps -a --filter volume=` returns).
 VOLUME_USERS="donalabs_vaultwarden_data=donalabs-vaultwarden donalabs_open_webui_data=donalabs-open-webui donalabs_n8n_data=donalabs-n8n donalabs_penpot_assets=donalabs-penpot-frontend,donalabs-penpot-backend donalabs_plausible_data=donalabs-plausible donalabs_plausible_event_data=donalabs-plausible-clickhouse"
@@ -103,6 +103,7 @@ check "no argument touches no data" not touched_data
 
 run_restore yes "$SB/backups/does-not-exist"
 check "missing backup dir exits 1" [ "$RC" -eq 1 ]
+check "missing backup dir prints usage" grep -q 'usage: ./scripts/restore.sh' <<< "$OUT"
 check "missing backup dir touches no data" not touched_data
 
 take_backup
@@ -193,7 +194,9 @@ check "containers of untouched volumes are not stopped" not grep -qx 'stop donal
 # --- 5. database container down: that dump is skipped, the rest restored ------
 new_sandbox
 take_backup
-export FAKE_RUNNING="${ALL_PG/donalabs-penpot-db/} $ALL_APPS"
+# A running container whose name merely CONTAINS the down DB's name must not
+# count as that DB being up (the check has to match whole names).
+export FAKE_RUNNING="${ALL_PG/donalabs-penpot-db/donalabs-penpot-db-old} $ALL_APPS"
 run_restore yes "$BK"
 check "restore with a DB down exits 0" [ "$RC" -eq 0 ]
 check "down DB gets no psql" not grep -q '^exec -i donalabs-penpot-db ' "$FAKE_LOG"
@@ -212,6 +215,20 @@ set -e
 check "relative path restore exits 0" [ "$RC" -eq 0 ]
 check "relative path is mounted absolute" grep -q -- "-v $BK:/backup:ro " "$FAKE_LOG"
 check "relative path still restores volumes" bash -c "[ \$(grep -c '^run ' '$FAKE_LOG') -eq 6 ]"
+
+# --- 7. the fake itself never runs a command outside the sandbox -------------
+# The fake executes the script's real `sh -c` on the host. A command that names
+# any other absolute path, or escapes with "..", must be refused, not run.
+new_sandbox
+mkdir -p "$SB/canary" && echo keep > "$SB/canary/file"
+fake_run() { PATH="$SB/bin:$PATH" docker run --rm -v "donalabs_n8n_data:/dst" \
+  -v "$SB/backups:/backup:ro" alpine:3.21 sh -c "$1" >/dev/null 2>&1; }
+check "fake refuses a host path outside the sandbox" not fake_run "rm -rf $SB/canary /dst/*"
+check "fake refuses '..' escaping the volume" not fake_run "rm -rf /dst/../../canary"
+check "refused commands deleted nothing" [ -f "$SB/canary/file" ]
+check "fake still runs a mapped command" fake_run "rm -rf /dst/* 2>/dev/null; true"
+check "mapped command acted on the volume only" \
+  bash -c "[ ! -e '$SB/vols/donalabs_n8n_data/data.txt' ] && [ -f '$SB/canary/file' ]"
 
 echo
 echo "restore.sh: $PASS passed, $FAIL failed"

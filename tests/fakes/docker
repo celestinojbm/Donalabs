@@ -4,8 +4,10 @@
 #
 #   FAKE_RUNNING       space-separated container names reported by `docker ps`
 #   FAKE_VOLUMES       space-separated volume names that `volume inspect` finds
-#   FAKE_VOLUME_USERS  `docker ps -a --filter volume=V` answers, as space-separated
-#                      "volume=container[,container...]" pairs
+#   FAKE_VOLUME_USERS  containers that mount each volume, as space-separated
+#                      "volume=container[,container...]" pairs. `docker ps -a
+#                      --filter volume=V` lists them all; without -a, only those
+#                      also in FAKE_RUNNING (as the real CLI does)
 #   FAKE_PGDUMP_FAIL   container whose `pg_dump` exits non-zero
 #   FAKE_TAR_FAIL      volume whose tar snapshot (`docker run`) exits non-zero
 #   FAKE_PSQL_FAIL     container whose `psql` restore exits non-zero
@@ -14,6 +16,8 @@
 #   FAKE_VOLROOT       if set, a volume V is the directory $FAKE_VOLROOT/V and the
 #                      `sh -c` of a `docker run` really runs (real tar, real rm)
 #                      with its /src, /dst and /backup mounts mapped to host dirs.
+#                      Any other absolute path (or a "..") in the command is
+#                      refused, so a buggy script cannot delete host files.
 #                      Unset: `docker run` only writes a placeholder tarball.
 #   FAKE_LOG           file every invocation is appended to (one line per call)
 set -euo pipefail
@@ -37,6 +41,21 @@ run_mapped() {
   if [[ " $cmd " =~ [[:space:]]/(src|dst|backup)(/|[[:space:]]) ]]; then
     echo "fake docker: unmapped container path in: $cmd" >&2; exit 1
   fi
+  # This runs the script's command on the HOST, so every absolute path in it must
+  # be inside the volume dir or the backup dir (or be /dev/null). A buggy script
+  # with `rm -rf /some/host/path` or `/dst/../..` is refused instead of run.
+  local tok path
+  set -f   # tokens like /dst/* are checked as text, not expanded
+  for tok in $cmd; do
+    path="${tok#*>}"; path="${path%;}"
+    case "$path" in /*) ;; *) continue ;; esac
+    case "$path/" in */../*) echo "fake docker: '..' in path: $path" >&2; exit 1 ;; esac
+    case "$path" in
+      /dev/null|"$voldir"|"$voldir"/*|"$backup_dir"|"$backup_dir"/*) ;;
+      *) echo "fake docker: path outside the sandbox: $path" >&2; exit 1 ;;
+    esac
+  done
+  set +f
   sh -c "$cmd"
 }
 
@@ -46,15 +65,22 @@ case "${1:-}" in
   ps)
     # One printf = one write: a reader that exits early (grep -q) cannot SIGPIPE
     # the fake halfway through and turn "running" into "not running".
-    filter=""
-    for a in "$@"; do case "$a" in volume=*) filter="${a#volume=}" ;; esac; done
+    filter="" all=0
+    for a in "$@"; do
+      case "$a" in volume=*) filter="${a#volume=}" ;; -a|--all) all=1 ;; esac
+    done
     if [ -n "$filter" ]; then
+      out=""
       for pair in ${FAKE_VOLUME_USERS:-}; do
         [ "${pair%%=*}" = "$filter" ] || continue
         users="${pair#*=}"
-        # shellcheck disable=SC2086  # split the comma list into one name per line
-        printf '%s\n' ${users//,/ }
+        for c in ${users//,/ }; do
+          # Like the real CLI: without -a only running containers are listed.
+          [ "$all" -eq 1 ] || in_list "$c" "${FAKE_RUNNING:-}" || continue
+          out="$out$c"$'\n'
+        done
       done
+      printf '%s' "$out"
       exit 0
     fi
     # shellcheck disable=SC2086  # word splitting of the name list is the point

@@ -8,6 +8,11 @@ the set of defaults and habits that keep a self-hosted platform out of trouble.
 - **Generated locally, never committed.** `scripts/generate-secrets.sh` creates
   `.env` with strong random secrets and `chmod 600`s it. `.env`, `backups/`, and
   runtime data are git-ignored — only `.env.example` (placeholders) is tracked.
+- **The generator fails closed and never half-writes `.env`.** It writes to a
+  0600 temp file and renames it over `.env`, so a crash or full disk cannot
+  truncate existing keys. If any `GENERATE` would survive (a key with no
+  generator, or a line like `KEY = GENERATE`), it exits with an error and leaves
+  `.env` untouched. CRLF endings and `export KEY=` lines are understood.
 - **Vaultwarden is the source of truth for credentials.** After first-run, store
   every service's admin login and API keys in Vaultwarden. Don't scatter secrets
   across notes and shell history.

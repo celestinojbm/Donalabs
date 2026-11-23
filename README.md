@@ -112,7 +112,7 @@ donalabs/
 | Stop (keep data) | `./stop.sh` · `./stop.sh --down` (remove containers, keep volumes) |
 | Update to pinned tags | `./update.sh` (backs up first, then pulls + recreates) |
 | Back up | `./backup.sh` · `--consistent` (brief downtime, crash-consistent) · `--allow-partial` (subset of the stack) |
-| Restore | `./scripts/restore.sh backups/<timestamp>` |
+| Restore | `./scripts/restore.sh backups/<timestamp>` · `--allow-incomplete` (restore what an incomplete backup has) |
 | Health check | `./scripts/health.sh` |
 | Reverse proxy (HTTPS) | `./scripts/proxy.sh up` · `down` · `validate` |
 | Create shared network | `./scripts/init-network.sh` (also done by `start.sh`) |
@@ -137,6 +137,29 @@ this, a stack left stopped would rotate every good backup away while cron
 reported success. If you deliberately run only part of the stack, use
 `./backup.sh --allow-partial` to accept missing components (real dump/tar errors
 still fail).
+
+### Restoring
+
+`./scripts/restore.sh backups/<timestamp>` **overwrites** current data. Before
+asking for confirmation it checks, without touching anything, that
+`MANIFEST.txt` says `STATUS: COMPLETE` (otherwise it refuses unless you pass
+`--allow-incomplete`) and that every dump and tarball is readable.
+
+- **Databases** (must be running): each dump is loaded into a temporary
+  database with `ON_ERROR_STOP` in a single transaction, then swapped in by
+  renaming. If anything fails the live database is left as it was. The previous
+  database is kept as `<db>__pre_restore_<timestamp>` so a restore can be
+  undone; drop it once you have verified the result (the script prints the
+  command). It takes as much disk as the live database.
+- **Volumes**: running containers that use the volume are stopped, the tarball
+  is extracted into a staging directory on the same volume, and only then
+  replaces the old contents (this needs free space for a second copy). If the
+  extraction fails the old data is untouched and the containers are restarted;
+  if it fails midway through the swap they are left **stopped** on purpose.
+  Containers that were already stopped are not started.
+
+It exits **0 only if everything in the backup was restored**; otherwise it lists
+what was not restored and exits 1.
 
 Schedule it with cron:
 

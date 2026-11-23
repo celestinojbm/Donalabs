@@ -86,7 +86,10 @@ jobs:
       - name: Script tests
         # Behavioural tests for the helper scripts (backup.sh completeness,
         # exit codes, retention safety; generate-secrets.sh contract with
-        # .env.example, formats, idempotency; restore.sh guards and a real
-        # backup -> restore round trip). They use tests/fakes/docker and
-        # throwaway sandboxes, so no Docker daemon is needed and nothing is pulled.
+        # .env.example, formats, idempotency; restore.sh guards, failure
+        # handling and a real backup -> restore round trip). They use
+        # tests/fakes/docker and throwaway sandboxes, so no Docker daemon is
+        # needed and nothing is pulled. restore-postgres.test.sh starts a
+        # throwaway cluster from the runner's preinstalled PostgreSQL (CI=true
+        # makes a missing server a failure, not a skip).
         run: ./tests/run.sh

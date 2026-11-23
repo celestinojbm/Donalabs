@@ -13,6 +13,10 @@
 #   FAKE_PSQL_FAIL     container whose `psql` restore exits non-zero
 #   FAKE_PSQL_DIR      if set, `docker exec -i C psql ...` saves its stdin to
 #                      $FAKE_PSQL_DIR/C.sql (what restore.sh piped into psql)
+#   FAKE_PG_SOCKET     if set, `docker exec [-i] C psql|pg_dump ARGS` runs the
+#                      REAL psql/pg_dump with `-h $FAKE_PG_SOCKET ARGS` (a
+#                      throwaway local Postgres; every container shares it)
+#   FAKE_STOP_FAIL     container whose `docker stop` exits non-zero
 #   FAKE_VOLROOT       if set, a volume V is the directory $FAKE_VOLROOT/V and the
 #                      `sh -c` of a `docker run` really runs (real tar, real rm)
 #                      with its /src, /dst and /backup mounts mapped to host dirs.
@@ -89,7 +93,12 @@ case "${1:-}" in
     shift
     interactive=0
     [ "${1:-}" = "-i" ] && { interactive=1; shift; }
-    container="$1"
+    container="$1" tool="${2:-}"
+    if [ -n "${FAKE_PG_SOCKET:-}" ] && { [ "$tool" = psql ] || [ "$tool" = pg_dump ]; }; then
+      shift 2
+      exec "$tool" -h "$FAKE_PG_SOCKET" "$@"
+    fi
+    if [ "$interactive" -eq 0 ] && [ "$tool" = psql ]; then exit 0; fi   # psql -c ...
     if [ "$interactive" -eq 1 ]; then
       input="$(cat)"   # always drain stdin, like a real psql would
       [ "$container" = "${FAKE_PSQL_FAIL:-}" ] && { echo "psql: error" >&2; exit 1; }
@@ -102,8 +111,10 @@ case "${1:-}" in
     [ "${2:-}" = "inspect" ] || exit 1
     in_list "$3" "${FAKE_VOLUMES:-}" ;;
   run)
-    vol="" mount="" backup_dir="" last=""
+    vol="" mount="" backup_dir="" last="" prev="" script=""
     for a in "$@"; do
+      [ "$prev" = "-c" ] && script="$a"
+      prev="$a"
       case "$a" in
         *:/src:ro)    vol="${a%%:/src:ro}"; mount=src ;;
         *:/dst)       vol="${a%%:/dst}"; mount=dst ;;
@@ -113,10 +124,12 @@ case "${1:-}" in
       last="$a"
     done
     [ "$vol" = "${FAKE_TAR_FAIL:-}" ] && { echo "tar: error" >&2; exit 1; }
-    if [ -n "${FAKE_VOLROOT:-}" ]; then run_mapped "$mount" "$vol" "$backup_dir" "$last"; exit $?; fi
+    [ -n "${script:-}" ] || script="$last"
+    if [ -n "${FAKE_VOLROOT:-}" ]; then run_mapped "$mount" "$vol" "$backup_dir" "$script"; exit $?; fi
     name="$(sed -n 's#.*tar czf /backup/\([^ ]*\).*#\1#p' <<< "$last")"
     [ -n "$backup_dir" ] && [ -n "$name" ] || { echo "fake docker: unexpected run: $*" >&2; exit 1; }
     echo "fake tar of $vol" > "$backup_dir/$name" ;;
-  stop|start) exit 0 ;;
+  stop) [ "${2:-}" != "${FAKE_STOP_FAIL:-}" ] || { echo "stop: error" >&2; exit 1; } ;;
+  start) exit 0 ;;
   *) echo "fake docker: unsupported: $*" >&2; exit 1 ;;
 esac

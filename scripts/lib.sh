@@ -53,6 +53,28 @@ load_env() {
   done < "$ENV_FILE"
 }
 
+# Print the value KEY has in env FILE, parsed as load_env does (literal, last
+# assignment wins, one layer of quotes stripped). It also tolerates CRLF and an
+# `export ` prefix, so two copies of the same .env that differ only in format
+# compare equal. Returns 1 (prints nothing) if KEY is not assigned in FILE.
+#   if v="$(env_get "$f" KEY)"; then ...; fi     # never bare under set -e
+env_get() {
+  local file="$1" want="$2" line val found=1 out=""
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"
+    [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]] || continue
+    [ "${BASH_REMATCH[2]}" = "$want" ] || continue
+    val="${BASH_REMATCH[3]}"
+    case "$val" in
+      \"*\") val="${val%\"}"; val="${val#\"}" ;;
+      \'*\') val="${val%\'}"; val="${val#\'}" ;;
+    esac
+    out="$val" found=0
+  done < "$file"
+  [ "$found" -eq 0 ] && printf '%s' "$out"
+  return "$found"
+}
+
 # --- shared network ----------------------------------------------------------
 edge_network() { grep -E '^EDGE_NETWORK=' "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2 || echo "donalabs_edge"; }
 

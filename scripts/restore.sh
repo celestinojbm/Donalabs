@@ -5,13 +5,20 @@
 #   ./scripts/restore.sh backups/<timestamp>
 #   ./scripts/restore.sh backups/<timestamp> --allow-incomplete
 #
-#   --allow-incomplete  restore what a backup contains even though its
-#                       MANIFEST.txt is not "STATUS: COMPLETE" (an incomplete
-#                       backup, an interrupted one, or one from before the
-#                       marker existed) or lists a file that is missing.
+#   --allow-incomplete     restore what a backup contains even though its
+#                          MANIFEST.txt is not "STATUS: COMPLETE" (an incomplete
+#                          backup, an interrupted one, or one from before the
+#                          marker existed) or lists a file that is missing.
+#   --ignore-key-mismatch  restore even though an encryption key in .env differs
+#                          from the one in the backup's env.backup (the data it
+#                          protects will NOT be readable with the current key).
 #
 # Restores Postgres logical dumps and named-volume tarballs. The databases must
-# be running. Every file is integrity-checked BEFORE anything is touched.
+# be running. Every file is integrity-checked BEFORE anything is touched, and the
+# encryption keys in .env are compared with the backup's env.backup: restored
+# n8n / Cal.com / Plausible / Open WebUI data is only readable with the key it
+# was written with, so a mismatch is refused (nothing touched) until .env holds
+# the backup's keys.
 #
 #   Postgres: each dump is loaded into a temporary database with ON_ERROR_STOP
 #     in a single transaction, then swapped in by renaming. The live database is
@@ -28,14 +35,16 @@
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
-usage() { sed -n '4,10p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '4,14p' "$0" | sed 's/^# \{0,1\}//'; }
+USAGE="usage: ./scripts/restore.sh backups/<timestamp> [--allow-incomplete] [--ignore-key-mismatch]"
 
-SRC="" ALLOW_INCOMPLETE=0
+SRC="" ALLOW_INCOMPLETE=0 IGNORE_KEYS=0
 for arg in "$@"; do
   case "$arg" in
     --allow-incomplete) ALLOW_INCOMPLETE=1 ;;
+    --ignore-key-mismatch) IGNORE_KEYS=1 ;;
     -h|--help) usage; exit 0 ;;
-    -*) err "unknown option: $arg"; err "usage: ./scripts/restore.sh backups/<timestamp> [--allow-incomplete]"; exit 1 ;;
+    -*) err "unknown option: $arg"; err "$USAGE"; exit 1 ;;
     *) [ -z "$SRC" ] || { err "only one backup directory, got '$SRC' and '$arg'"; exit 1; }
        SRC="$arg" ;;
   esac
@@ -45,7 +54,7 @@ require_docker
 load_env
 
 if [ -z "$SRC" ] || [ ! -d "$SRC" ]; then
-  err "usage: ./scripts/restore.sh backups/<timestamp> [--allow-incomplete]"; exit 1
+  err "$USAGE"; exit 1
 fi
 SRC="$(cd "$SRC" && pwd)"   # absolute: a relative path would be a named volume to `docker -v`
 
@@ -59,6 +68,10 @@ elif grep -qx 'STATUS: COMPLETE' "$MANIFEST"; then
   while IFS= read -r f; do
     [ -f "${SRC}/${f}" ] || problems+=("MANIFEST lists ${f} but it is missing")
   done < <(awk '($1 == "pg" || $1 == "vol") && $(NF-1) == "->" { print $NF }' "$MANIFEST")
+  # "env  .env -> env.backup (SENSITIVE)": the keys needed to read the data.
+  if grep -q '^env .*-> env\.backup' "$MANIFEST" && [ ! -f "${SRC}/env.backup" ]; then
+    problems+=("MANIFEST lists env.backup but it is missing (the encryption keys of this backup)")
+  fi
 elif grep -qx 'STATUS: INCOMPLETE' "$MANIFEST"; then
   problems+=("MANIFEST.txt says STATUS: INCOMPLETE")
   while IFS= read -r l; do problems+=("  $l"); done < <(grep -E '^(FAIL|SKIP) ' "$MANIFEST" || true)
@@ -99,6 +112,72 @@ if [ "$(( ${#PLAN_PG[@]} + ${#PLAN_VOL[@]} ))" -eq 0 ]; then
   exit 1
 fi
 
+# --- 3. Can the restored data be read with the keys in .env? (read-only) -------
+# Apps encrypt part of what they store with a key from .env. Data restored from
+# this backup was written with the key in its env.backup; with any other key it
+# is unreadable (n8n does not even start). Only keys of what is being restored
+# count. Values are compared, never printed.
+#   "KEY|containers/volumes whose data depends on it|what breaks"
+DATA_KEYS=(
+  "N8N_ENCRYPTION_KEY|donalabs-n8n-db donalabs_n8n_data|n8n refuses to start and its stored credentials are unreadable"
+  "CALCOM_ENCRYPTION_KEY|donalabs-calcom-db|Cal.com cannot decrypt stored calendar/OAuth credentials"
+  "PLAUSIBLE_TOTP_VAULT_KEY|donalabs-plausible-db|Plausible cannot read 2FA secrets (users with 2FA cannot log in)"
+  "OPENWEBUI_SECRET_KEY|donalabs_open_webui_data|Open WebUI logs everyone out and cannot read the data it encrypted"
+)
+# Keys that only sign sessions/tokens: a change logs people out, no data is lost.
+SESSION_KEYS=(
+  "CALCOM_NEXTAUTH_SECRET|donalabs-calcom-db"
+  "PLAUSIBLE_SECRET_KEY_BASE|donalabs-plausible-db"
+  "PENPOT_SECRET_KEY|donalabs-penpot-db donalabs_penpot_assets"
+)
+PLANNED=" "
+for entry in "${PLAN_PG[@]+"${PLAN_PG[@]}"}"; do PLANNED+="${entry%%:*} "; done
+for vol in "${PLAN_VOL[@]+"${PLAN_VOL[@]}"}"; do PLANNED+="$vol "; done
+key_is_relevant() { local t; for t in $1; do [[ "$PLANNED" == *" $t "* ]] && return 0; done; return 1; }
+# key_state KEY -> same | differs | unknown (env.backup does not set it)
+key_state() {
+  local b c
+  if ! b="$(env_get "$ENV_BACKUP" "$1")"; then
+    env_get "$ENV_FILE" "$1" >/dev/null && echo unknown || echo same; return
+  fi
+  if c="$(env_get "$ENV_FILE" "$1")" && [ "$c" = "$b" ]; then echo same; else echo differs; fi
+}
+
+ENV_BACKUP="${SRC}/env.backup"
+mismatched=()
+if [ ! -e "$ENV_BACKUP" ]; then
+  warn "no env.backup in this backup: cannot check that the encryption keys in .env match the data"
+elif [ ! -r "$ENV_BACKUP" ]; then
+  mismatched+=("env.backup is not readable by $(id -un): the encryption keys cannot be checked")
+else
+  for k in "${DATA_KEYS[@]}"; do
+    IFS='|' read -r key targets why <<< "$k"
+    key_is_relevant "$targets" || continue
+    case "$(key_state "$key")" in
+      differs) mismatched+=("$key differs from env.backup: $why") ;;
+      unknown) warn "env.backup has no $key (older backup?): cannot check it matches the restored data" ;;
+    esac
+  done
+  for k in "${SESSION_KEYS[@]}"; do
+    IFS='|' read -r key targets <<< "$k"
+    key_is_relevant "$targets" || continue
+    [ "$(key_state "$key")" != differs ] \
+      || warn "$key differs from env.backup: sessions signed with the old key end (users log in again)"
+  done
+fi
+if [ "${#mismatched[@]}" -gt 0 ]; then
+  for m in "${mismatched[@]}"; do err "$m"; done
+  if [ "$IGNORE_KEYS" -eq 0 ]; then
+    err "refusing to restore data the current .env cannot read. Nothing was touched. To fix:"
+    err "  1. copy the KEY=... line of each key above from ${ENV_BACKUP} into .env"
+    err "  2. re-run this restore"
+    err "  3. run ./start.sh so the containers pick up the key (a restart keeps the old one)"
+    err "to restore with the current keys anyway, re-run with --ignore-key-mismatch"
+    exit 1
+  fi
+  warn "--ignore-key-mismatch: restoring anyway; the data above will NOT be readable with the current .env"
+fi
+
 info "will restore from: $SRC"
 for entry in "${PLAN_PG[@]+"${PLAN_PG[@]}"}"; do info "  database ${entry%%:*}"; done
 for vol in "${PLAN_VOL[@]+"${PLAN_VOL[@]}"}"; do info "  volume   $vol"; done
@@ -114,7 +193,7 @@ FAILED=()
 RUNNING="$(docker ps --format '{{.Names}}')"
 is_running() { grep -qx -- "$1" <<< "$RUNNING"; }
 
-# --- 3. Postgres --------------------------------------------------------------
+# --- 4. Postgres --------------------------------------------------------------
 # A plain pg_dump (no --clean) applied to a live database does NOT restore it:
 # CREATE TABLE fails with "already exists", COPY collides with existing rows,
 # and psql still exits 0. So: load into an empty temporary database, stop on the
@@ -179,7 +258,7 @@ for entry in "${PLAN_PG[@]+"${PLAN_PG[@]}"}"; do
   restore_pg "$container" "$user" "$db" "${SRC}/${container}_pg.sql.gz" || FAILED+=("database $container")
 done
 
-# --- 4. Volumes ---------------------------------------------------------------
+# --- 5. Volumes ---------------------------------------------------------------
 # Extract into a staging dir on the same volume; only after tar succeeds is the
 # old content removed and the staged files moved (renamed) into place.
 # Exit 3 = tar failed, old data untouched. Anything else non-zero = unknown.
@@ -227,7 +306,7 @@ for vol in "${PLAN_VOL[@]+"${PLAN_VOL[@]}"}"; do
   esac
 done
 
-# --- 5. Verdict -----------------------------------------------------------------
+# --- 6. Verdict -----------------------------------------------------------------
 echo
 if [ "${#FAILED[@]}" -gt 0 ]; then
   for f in "${FAILED[@]}"; do err "NOT restored: $f"; done

@@ -387,6 +387,112 @@ run_restore yes "$SB/backups/empty"
 check "a backup with nothing to restore exits 1" [ "$RC" -eq 1 ]
 check "a backup with nothing to restore says so" grep -q 'nothing to restore' <<< "$OUT"
 
+# --- 14. encryption keys: .env must match the backup's env.backup (bug 7) -----
+# Restored n8n / Cal.com / Plausible / Open WebUI data is only readable with the
+# key it was written with. A different key in .env is refused before anything is
+# touched (or asked), and no key value is ever printed.
+OLD_N8N=old-n8n-key-0123456789abcdef OLD_CAL=old-calcom-key-0123456789
+keyed_env() {   # a sandbox whose .env has real-looking keys
+  new_sandbox
+  cat >> "$SB/.env" <<EOF
+N8N_ENCRYPTION_KEY=$OLD_N8N
+CALCOM_ENCRYPTION_KEY='$OLD_CAL'
+PLAUSIBLE_TOTP_VAULT_KEY=old-totp-key
+OPENWEBUI_SECRET_KEY=old-webui-key
+CALCOM_NEXTAUTH_SECRET=old-nextauth
+PLAUSIBLE_SECRET_KEY_BASE=old-skb
+PENPOT_SECRET_KEY=old-penpot
+EOF
+}
+keyed_sandbox() { keyed_env; take_backup; }   # ... and a full backup of it
+set_env() { sed -i "/^$1=/d" "$SB/.env"; [ "$#" -lt 2 ] || echo "$1=$2" >> "$SB/.env"; }
+no_secret_printed() { ! grep -qE "$OLD_N8N|new-n8n-key|$OLD_CAL|new-calcom-key" <<< "$OUT"; }
+
+keyed_sandbox
+check "setup: backup with keys is complete" [ "$RC" -eq 0 ]
+# Same keys, different format (CRLF, quotes, export, reordered): not a mismatch.
+{ printf 'export N8N_ENCRYPTION_KEY="%s"\r\n' "$OLD_N8N"; grep -v '^N8N_ENCRYPTION_KEY=' "$SB/.env"; } > "$SB/env.new"
+mv "$SB/env.new" "$SB/.env"
+run_restore yes "$BK"
+check "same keys in another format: restore exits 0" [ "$RC" -eq 0 ]
+check "same keys: no key warning" not grep -q 'differs from env.backup' <<< "$OUT"
+
+keyed_sandbox
+set_env N8N_ENCRYPTION_KEY new-n8n-key-regenerated
+run_restore yes "$BK"
+check "n8n key changed: refused (exit 1)" [ "$RC" -eq 1 ]
+check "n8n key changed: nothing touched" not touched_data
+check "n8n key changed: not even asked to confirm" not grep -q "Type 'yes'" <<< "$OUT"
+check "n8n key changed: names the key" grep -q 'N8N_ENCRYPTION_KEY differs from env.backup' <<< "$OUT"
+check "n8n key changed: says to copy the key from env.backup" grep -qF "above from $BK/env.backup into .env" <<< "$OUT"
+check "n8n key changed: offers --ignore-key-mismatch" grep -q -- '--ignore-key-mismatch' <<< "$OUT"
+check "n8n key changed: says to recreate the containers" grep -q './start.sh' <<< "$OUT"
+check "n8n key changed: no key value is printed" no_secret_printed
+check "n8n key changed: only that key is reported" not grep -q 'CALCOM_ENCRYPTION_KEY' <<< "$OUT"
+
+run_restore yes "$BK" --ignore-key-mismatch
+check "--ignore-key-mismatch restores anyway (exit 0)" [ "$RC" -eq 0 ]
+check "--ignore-key-mismatch warns what will be unreadable" grep -q 'will NOT be readable' <<< "$OUT"
+check "--ignore-key-mismatch restored n8n" pg_restored donalabs-n8n-db n8n n8n
+check "--ignore-key-mismatch: no key value is printed" no_secret_printed
+
+keyed_sandbox
+set_env CALCOM_ENCRYPTION_KEY            # removed from .env entirely
+set_env OPENWEBUI_SECRET_KEY ""           # or emptied
+run_restore yes "$BK"
+check "key removed / emptied in .env: refused" bash -c "[ $RC -eq 1 ] && ! grep -Eq '^(exec |run |stop |start )' '$FAKE_LOG'"
+check "removed key is reported" grep -q 'CALCOM_ENCRYPTION_KEY differs' <<< "$OUT"
+check "emptied key is reported" grep -q 'OPENWEBUI_SECRET_KEY differs' <<< "$OUT"
+
+# Only keys of what is being restored count: an n8n-only backup does not care
+# about Cal.com's key.
+keyed_env
+export FAKE_RUNNING="donalabs-n8n-db donalabs-n8n" FAKE_VOLUMES="donalabs_n8n_data"
+take_backup --allow-partial
+check "setup: n8n-only backup" bash -c "[ $RC -eq 0 ] && [ ! -e '$BK/donalabs-calcom-db_pg.sql.gz' ]"
+export FAKE_RUNNING="$ALL_PG $ALL_APPS" FAKE_VOLUMES="$ALL_VOLS"
+set_env CALCOM_ENCRYPTION_KEY new-calcom-key
+run_restore yes "$BK"
+check "key of a service not in the backup: restore exits 0" [ "$RC" -eq 0 ]
+check "key of a service not in the backup: not reported" not grep -q 'CALCOM_ENCRYPTION_KEY' <<< "$OUT"
+
+# A session-only key: warn, do not block (people log in again, no data lost).
+keyed_sandbox
+set_env PENPOT_SECRET_KEY new-penpot
+run_restore yes "$BK"
+check "session key changed: restore exits 0" [ "$RC" -eq 0 ]
+check "session key changed: warned" grep -q 'PENPOT_SECRET_KEY differs from env.backup: sessions' <<< "$OUT"
+
+# env.backup missing: a COMPLETE manifest lists it, so the backup is incomplete.
+keyed_sandbox
+rm "$BK/env.backup"
+run_restore yes "$BK"
+check "env.backup missing: refused, nothing touched" bash -c "[ $RC -eq 1 ] && ! grep -Eq '^(exec |run |stop |start )' '$FAKE_LOG'"
+check "env.backup missing: says so" grep -q 'MANIFEST lists env.backup but it is missing' <<< "$OUT"
+run_restore yes "$BK" --allow-incomplete
+check "env.backup missing + --allow-incomplete: restores (exit 0)" [ "$RC" -eq 0 ]
+check "env.backup missing + --allow-incomplete: warns keys are unchecked" grep -q 'cannot check that the encryption keys' <<< "$OUT"
+
+# A key the backup's env.backup never had (older backup): cannot check, warn.
+keyed_sandbox
+sed -i '/^OPENWEBUI_SECRET_KEY=/d' "$BK/env.backup"
+run_restore yes "$BK"
+check "key absent from env.backup: restore exits 0" [ "$RC" -eq 0 ]
+check "key absent from env.backup: warned" grep -q 'env.backup has no OPENWEBUI_SECRET_KEY' <<< "$OUT"
+
+# env.backup the restoring user cannot read: refuse (root reads anything, skip).
+if [ "$(id -u)" -ne 0 ]; then
+  keyed_sandbox
+  chmod 000 "$BK/env.backup"
+  run_restore yes "$BK"
+  check "unreadable env.backup: refused, nothing touched" bash -c "[ $RC -eq 1 ] && ! grep -Eq '^(exec |run |stop |start )' '$FAKE_LOG'"
+  check "unreadable env.backup: says so" grep -q 'env.backup is not readable' <<< "$OUT"
+  chmod 600 "$BK/env.backup"
+fi
+
+run_restore yes --help
+check "--help documents --ignore-key-mismatch" grep -q -- '--ignore-key-mismatch' <<< "$OUT"
+
 echo
 echo "restore.sh: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

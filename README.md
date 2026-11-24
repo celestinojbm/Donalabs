@@ -112,7 +112,7 @@ donalabs/
 | Stop (keep data) | `./stop.sh` · `./stop.sh --down` (remove containers, keep volumes) |
 | Update to pinned tags | `./update.sh` (backs up first, then pulls + recreates) |
 | Back up | `./backup.sh` · `--consistent` (brief downtime, crash-consistent) · `--allow-partial` (subset of the stack) |
-| Restore | `./scripts/restore.sh backups/<timestamp>` · `--allow-incomplete` (restore what an incomplete backup has) |
+| Restore | `./scripts/restore.sh backups/<timestamp>` · `--allow-incomplete` (restore what an incomplete backup has) · `--ignore-key-mismatch` (restore although `.env` keys differ from the backup's) |
 | Health check | `./scripts/health.sh` |
 | Reverse proxy (HTTPS) | `./scripts/proxy.sh up` · `down` · `validate` |
 | Create shared network | `./scripts/init-network.sh` (also done by `start.sh`) |
@@ -144,6 +144,19 @@ still fail).
 asking for confirmation it checks, without touching anything, that
 `MANIFEST.txt` says `STATUS: COMPLETE` (otherwise it refuses unless you pass
 `--allow-incomplete`) and that every dump and tarball is readable.
+
+It also compares the **encryption keys** in `.env` with the backup's
+`env.backup` (values are compared, never printed). n8n, Cal.com, Plausible
+(2FA) and Open WebUI encrypt part of their data with a key from `.env`; restored
+with a different key that data is unreadable, and n8n does not even start. So if
+`N8N_ENCRYPTION_KEY`, `CALCOM_ENCRYPTION_KEY`, `PLAUSIBLE_TOTP_VAULT_KEY` or
+`OPENWEBUI_SECRET_KEY` differs for a service being restored (typical after
+re-running `generate-secrets.sh` on a new server), it refuses without touching
+anything. Copy those lines from `env.backup` into `.env`, re-run the restore,
+then run `./start.sh` so the containers pick up the key. `--ignore-key-mismatch`
+restores anyway. Session-only keys (`CALCOM_NEXTAUTH_SECRET`,
+`PLAUSIBLE_SECRET_KEY_BASE`, `PENPOT_SECRET_KEY`) only log people out, so they
+just produce a warning.
 
 - **Databases** (must be running): each dump is loaded into a temporary
   database with `ON_ERROR_STOP` in a single transaction, then swapped in by

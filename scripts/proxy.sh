@@ -25,8 +25,9 @@ case "${1:-}" in
     ok "Caddy stopped."
     ;;
   validate)
+    tag="$(env_get "$ENV_FILE" CADDY_IMAGE_TAG)" || true
     docker run --rm -v "${DONALABS_ROOT}/proxy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro" \
-      "caddy:$(grep -E '^CADDY_IMAGE_TAG=' "$ENV_FILE" | cut -d= -f2 || echo 2-alpine)" \
+      "caddy:${tag:-2-alpine}" \
       caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
     ;;
   logs)

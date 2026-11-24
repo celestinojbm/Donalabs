@@ -69,6 +69,10 @@ disk to run the full stack, plus `openssl` and `bash` for the scripts.
   SQLite (with a documented Postgres upgrade path).
 - **Single source of truth.** All configuration lives in the root `.env`
   (documented by `.env.example`). Secrets are generated locally and never committed.
+  The helper scripts read `.env` the way Docker Compose does (CRLF endings,
+  `export KEY=`, indentation, `KEY=value # comment`, quotes and their escapes),
+  so `backup.sh`/`restore.sh` act on the same values the containers run with.
+  `${VAR}` interpolation inside `.env` values is not supported by the scripts.
 - **Safe defaults.** Published ports bind to `127.0.0.1` only; expose services
   publicly through the optional **Caddy** reverse proxy (automatic HTTPS).
 

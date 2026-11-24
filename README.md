@@ -116,7 +116,7 @@ donalabs/
 | Stop (keep data) | `./stop.sh` · `./stop.sh --down` (remove containers, keep volumes) |
 | Update to pinned tags | `./update.sh` (backs up first, then pulls + recreates) |
 | Back up | `./backup.sh` · `--consistent` (brief downtime, crash-consistent) · `--allow-partial` (subset of the stack) |
-| Restore | `./scripts/restore.sh backups/<timestamp>` · `--allow-incomplete` (restore what an incomplete backup has) · `--ignore-key-mismatch` (restore although `.env` keys differ from the backup's) |
+| Restore | `./scripts/restore.sh backups/<timestamp>` · `--allow-incomplete` (restore what an incomplete backup has) · `--ignore-key-mismatch` (restore although `.env` keys differ from the backup's) · `RESTORE_KEEP_PREVIOUS=N` (old database copies kept, default 2) |
 | Health check | `./scripts/health.sh` |
 | Reverse proxy (HTTPS) | `./scripts/proxy.sh up` · `down` · `validate` |
 | Create shared network | `./scripts/init-network.sh` (also done by `start.sh`) |
@@ -163,11 +163,26 @@ restores anyway. Session-only keys (`CALCOM_NEXTAUTH_SECRET`,
 just produce a warning.
 
 - **Databases** (must be running): each dump is loaded into a temporary
-  database with `ON_ERROR_STOP` in a single transaction, then swapped in by
+  database with `ON_ERROR_STOP` in a single transaction, given the live
+  database's own **database-level** grants (`GRANT ... ON DATABASE`), settings
+  (`ALTER DATABASE ... SET`, `ALTER ROLE ... IN DATABASE ... SET`), owner,
+  connection limit and comment (a `pg_dump` without `--create` does not carry
+  them; table/schema grants come from the dump itself), then swapped in by
   renaming. If anything fails the live database is left as it was. The previous
   database is kept as `<db>__pre_restore_<timestamp>` so a restore can be
-  undone; drop it once you have verified the result (the script prints the
-  command). It takes as much disk as the live database.
+  undone; it takes as much disk as the live database. Only the newest
+  `RESTORE_KEEP_PREVIOUS` copies per database are kept (default **2**, integer
+  ≥ 1, from the environment or `.env`): older ones are dropped after that
+  database is restored. Two, not one, so that a second attempt (say, after
+  restoring the wrong backup) does not drop the only copy of the original data.
+  A copy someone is connected to is not forced; only exact
+  `<db>__pre_restore_<14 digits>` names are pruned.
+- **Interrupted** (Ctrl-C, SSH drop, `kill`, unexpected error): an exit trap
+  makes any database it had locked for the swap accept connections again
+  (whichever side of the swap it stopped on), drops the temporary database and
+  says the restore is NOT complete. If it cannot, it prints the exact `psql`
+  command to run. Containers stopped for a volume that was being replaced stay
+  stopped (its contents may be partial) and the `docker start` command is printed.
 - **Volumes**: running containers that use the volume are stopped, the tarball
   is extracted into a staging directory on the same volume, and only then
   replaces the old contents (this needs free space for a second copy). If the

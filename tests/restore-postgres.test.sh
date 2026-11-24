@@ -86,12 +86,13 @@ damage() {
   local e u d
   for e in $DBS; do
     IFS=: read -r _ u d <<< "$e"
-    q "$u" "$d" -c "UPDATE items SET v = 'changed'" -c "INSERT INTO items (owner, v) VALUES (2, 'new')" \
+    q "$u" "$d" -c "SET client_min_messages = warning" -c "UPDATE items SET v = 'changed'" -c "INSERT INTO items (owner, v) VALUES (2, 'new')" \
       -c "DROP TABLE IF EXISTS extra" -c "CREATE TABLE IF NOT EXISTS junk (x int)"
   done
 }
 db_exists() { [ "$(q postgres postgres -c "SELECT count(*) FROM pg_database WHERE datname = '$1'")" = 1 ]; }
 not_exists_tmp() { ! db_exists "$1__restoring"; }
+not_complete() { ! grep -q 'restore complete' <<< "$OUT"; }
 # How many kept copies <db>__pre_restore_* exist that accept connections.
 old_copies() { q postgres postgres -c "SELECT count(*) FROM pg_database WHERE datname LIKE '$1\_\_pre\_restore\_%' AND datallowconn"; }
 drop_old_copies() {
@@ -127,7 +128,13 @@ BK="$(find "$SB/backups" -mindepth 1 -maxdepth 1 -type d | head -1)"
 check "backup with real pg_dump succeeds" [ "$RC" -eq 0 ]
 check "dump is real SQL" bash -c "gunzip -c '$BK/donalabs-calcom-db_pg.sql.gz' | grep -q 'CREATE TABLE public.items'"
 
+# Old copies are named <db>__pre_restore_<second>: two restores that start in
+# the same second would collide (the second one then fails safely). Never let
+# the test do that.
+LAST_START=""
 run_restore() {
+  while [ "$(date -u +%s)" = "$LAST_START" ]; do sleep 0.1; done
+  LAST_START="$(date -u +%s)"
   set +e
   OUT="$(PATH="$SB/bin:$PATH" "$SB/scripts/restore.sh" "$@" 2>&1 <<< yes)"; RC=$?
   set -e
@@ -173,6 +180,150 @@ eq "SQL error in a dump: live n8n database untouched" "$BEFORE" "$(snapshot n8n 
 check "SQL error in a dump: no temporary database left" not_exists_tmp n8n
 eq "SQL error in a dump: no old copy made for n8n" "0" "$(old_copies n8n)"
 eq "SQL error in n8n: the other databases are still restored" "$ORIG" "$(snapshot calcom calendso)"
+
+# Put the good dump back for the next sections (section 2 broke n8n's).
+
+
+set +e
+OUT="$(PATH="$SB/bin:$PATH" "$SB/backup.sh" --allow-partial 2>&1)"; RC=$?
+set -e
+check "setup: fresh backup for the next sections" [ "$RC" -eq 0 ]
+BK="$(find "$SB/backups" -mindepth 1 -maxdepth 1 -type d ! -path "$BK" | sort | tail -1)"
+allows_conn() { q postgres postgres -c "SELECT datallowconn FROM pg_database WHERE datname = '$1'"; }
+locked_dbs() { q postgres postgres -c "SELECT coalesce(string_agg(datname, ',' ORDER BY datname), '') FROM pg_database WHERE NOT datallowconn AND datname <> 'template0'"; }
+
+# --- 3. an interrupted restore never leaves a database refusing connections -----
+# FAKE_KILL_ON sends SIGTERM to restore.sh right after the matching docker call,
+# like a Ctrl-C / SSH drop / kill at that exact point.
+interrupt_at() {   # <ERE of the docker call> -> runs restore.sh, killed there
+  rm -f "$FAKE_LOG.killed"
+  FAKE_KILL_ON="$1" run_restore "$BK"
+  rm -f "$FAKE_LOG.killed"
+}
+
+# 3a. Killed right after the live database was locked, before the swap.
+drop_old_copies; damage
+BEFORE="$(snapshot calcom calendso)"
+interrupt_at 'donalabs-calcom-db .*"calendso" WITH ALLOW_CONNECTIONS false'
+check "killed after the lock: exits non-zero" [ "$RC" -ne 0 ]
+check "killed after the lock: says it was interrupted" grep -q 'interrupted' <<< "$OUT"
+check "killed after the lock: does not say restore complete" not_complete
+eq "killed after the lock: no database left refusing connections" "" "$(locked_dbs)"
+eq "killed after the lock: live calendso untouched" "$BEFORE" "$(snapshot calcom calendso)"
+check "killed after the lock: no temporary database left" not_exists_tmp calendso
+eq "killed after the lock: no old copy made" "0" "$(old_copies calendso)"
+
+# 3b. Killed right after the swap committed, before the old copy was reopened.
+drop_old_copies; damage
+interrupt_at 'donalabs-calcom-db .*RENAME TO "calendso"'
+check "killed after the swap: exits non-zero" [ "$RC" -ne 0 ]
+eq "killed after the swap: no database left refusing connections" "" "$(locked_dbs)"
+eq "killed after the swap: restored data is live" "$ORIG" "$(snapshot calcom calendso)"
+eq "killed after the swap: old copy kept and reopened" "1" "$(old_copies calendso)"
+
+# 3c. Killed while the dump was loading into the temporary database.
+drop_old_copies; damage
+BEFORE="$(snapshot n8n n8n)"
+interrupt_at 'donalabs-n8n-db psql .* -d n8n__restoring .*--single-transaction'
+check "killed during the load: exits non-zero" [ "$RC" -ne 0 ]
+eq "killed during the load: live n8n untouched" "$BEFORE" "$(snapshot n8n n8n)"
+check "killed during the load: temporary database dropped" not_exists_tmp n8n
+eq "killed during the load: no database left refusing connections" "" "$(locked_dbs)"
+
+# A plain restore afterwards works (nothing left behind blocks it).
+drop_old_copies
+run_restore "$BK"
+check "restore after the interruptions exits 0" [ "$RC" -eq 0 ]
+
+# --- 4. database-level grants and settings survive the swap ---------------------
+# pg_dump without --create does not carry them: GRANT ... ON DATABASE, ALTER
+# DATABASE ... SET, ALTER ROLE ... IN DATABASE ... SET, the owner, the
+# connection limit and the comment live on the database itself, and the swap
+# replaces the database.
+drop_old_copies
+q postgres postgres \
+  -c "CREATE ROLE reader NOLOGIN" -c "CREATE ROLE app_owner NOLOGIN" \
+  -c "REVOKE ALL ON DATABASE calendso FROM PUBLIC" \
+  -c "GRANT CONNECT ON DATABASE calendso TO reader" \
+  -c "GRANT CREATE ON DATABASE calendso TO reader WITH GRANT OPTION" \
+  -c "ALTER DATABASE calendso SET statement_timeout = '7s'" \
+  -c "ALTER DATABASE calendso SET search_path = \"\$user\", public, \"Odd, schema\"" \
+  -c "ALTER ROLE reader IN DATABASE calendso SET work_mem = '5MB'" \
+  -c "ALTER DATABASE calendso CONNECTION LIMIT 50" \
+  -c "COMMENT ON DATABASE calendso IS 'Cal.com'" \
+  -c "ALTER DATABASE calendso OWNER TO app_owner"
+q calcom calendso -c "GRANT SELECT ON items TO reader"   # object grant: in the dump
+set +e
+OUT="$(PATH="$SB/bin:$PATH" "$SB/backup.sh" --allow-partial 2>&1)"; RC=$?
+set -e
+PREV_BK="$BK"
+BK="$(find "$SB/backups" -mindepth 1 -maxdepth 1 -type d ! -path "$PREV_BK" | sort | tail -1)"
+check "setup: backup with the table grant" [ "$RC" -eq 0 ] && [ "$BK" != "$PREV_BK" ]
+db_props() {
+  q postgres postgres -c "SELECT concat_ws(' | ', pg_get_userbyid(d.datdba), d.datconnlimit,
+      (SELECT string_agg(a, ',' ORDER BY a) FROM unnest(d.datacl::text[]) a),
+      (SELECT string_agg(coalesce(r.rolname, '-') || ':' || array_to_string(s.setconfig, ';'), ',' ORDER BY r.rolname NULLS FIRST)
+         FROM pg_db_role_setting s LEFT JOIN pg_roles r ON r.oid = s.setrole WHERE s.setdatabase = d.oid),
+      shobj_description(d.oid, 'pg_database'))
+    FROM pg_database d WHERE d.datname = '$1'"
+}
+PROPS="$(db_props calendso)"
+check "setup: database properties are set" grep -q 'app_owner | 50 | .*reader=C\*c/app_owner.*statement_timeout=7s.*reader:work_mem=5MB | Cal.com' <<< "$PROPS"
+run_restore "$BK"
+check "restore with database grants exits 0" [ "$RC" -eq 0 ]
+[ "$RC" -eq 0 ] || printf '%s\n' "$OUT" | sed 's/^/        | /'
+eq "owner, connection limit, grants, settings and comment carried over" "$PROPS" "$(db_props calendso)"
+eq "PUBLIC still has no CONNECT on the restored database" "f" \
+  "$(q postgres postgres -c "SELECT has_database_privilege('public', 'calendso', 'CONNECT')")"
+eq "table grants from the dump are there too" "t" \
+  "$(q calcom calendso -c "SELECT has_table_privilege('reader', 'items', 'SELECT')")"
+eq "search_path setting still works in a new session" '"$user", public, "Odd, schema"' \
+  "$(q calcom calendso -c "SHOW search_path")"
+
+# An empty list setting (SET search_path = '') is stored as "" and needs care.
+q postgres postgres -c "ALTER DATABASE plausible_db SET search_path = ''"
+run_restore "$BK"
+check "empty search_path setting is copied too (exit 0)" [ "$RC" -eq 0 ]
+eq "empty search_path carried over" '""' "$(q plausible plausible_db -c "SHOW search_path")"
+q postgres postgres -c "ALTER DATABASE plausible_db RESET search_path"
+
+# --- 5. old copies are pruned: RESTORE_KEEP_PREVIOUS (default 2) per database ---
+drop_old_copies
+for _ in 1 2 3; do run_restore "$BK"; done
+check "three restores in a row exit 0" [ "$RC" -eq 0 ]
+for e in $DBS; do
+  IFS=: read -r _ _ d <<< "$e"
+  eq "$d: only the 2 newest old copies are kept" "2" "$(old_copies "$d")"
+done
+check "pruning is reported" grep -q 'dropped old copy calendso__pre_restore_' <<< "$OUT"
+NEWEST="$(q postgres postgres -c "SELECT max(datname) FROM pg_database WHERE datname LIKE 'calendso\_\_pre\_restore\_%'")"
+RESTORE_KEEP_PREVIOUS=1 run_restore "$BK"
+check "RESTORE_KEEP_PREVIOUS=1: restore exits 0" [ "$RC" -eq 0 ]
+eq "RESTORE_KEEP_PREVIOUS=1: one old copy left" "1" "$(old_copies calendso)"
+check "RESTORE_KEEP_PREVIOUS=1: it is the one just made" \
+  bash -c "[ \"\$1\" \\> \"\$2\" ]" _ "$(q postgres postgres -c "SELECT max(datname) FROM pg_database WHERE datname LIKE 'calendso\_\_pre\_restore\_%'")" "$NEWEST"
+# Copies that do not follow the exact naming are never touched.
+q postgres postgres -c "CREATE DATABASE calendso__pre_restore_mine" -c "CREATE DATABASE calendso__pre_restore_20200101000000x"
+RESTORE_KEEP_PREVIOUS=1 run_restore "$BK"
+check "hand-made look-alike databases are not pruned" \
+  bash -c "db() { [ \"\$(psql -h '$PGROOT' -U postgres -d postgres -XAtc \"SELECT count(*) FROM pg_database WHERE datname = '\$1'\")\" = 1 ]; }; db calendso__pre_restore_mine && db calendso__pre_restore_20200101000000x"
+# A copy someone is connected to is not force-dropped: warn, restore still OK.
+drop_old_copies
+run_restore "$BK"
+held="$(q postgres postgres -c "SELECT datname FROM pg_database WHERE datname LIKE 'n8n\_\_pre\_restore\_%'")"
+psql -h "$PGROOT" -U n8n -d "$held" -X -q -c "SELECT pg_sleep(30)" >/dev/null 2>&1 &
+HOLD=$!
+for _ in $(seq 50); do
+  [ "$(q postgres postgres -c "SELECT count(*) FROM pg_stat_activity WHERE datname = '$held'")" = 1 ] && break
+  sleep 0.1
+done
+RESTORE_KEEP_PREVIOUS=1 run_restore "$BK"
+check "old copy in use: restore still exits 0" [ "$RC" -eq 0 ]
+check "old copy in use: warned, not dropped" bash -c "grep -q 'could not drop old copy $held' <<< \"\$1\" && [ \"\$(psql -h '$PGROOT' -U postgres -d postgres -XAtc \"SELECT count(*) FROM pg_database WHERE datname = '$held'\")\" = 1 ]" _ "$OUT"
+kill "$HOLD" 2>/dev/null || true; wait "$HOLD" 2>/dev/null || true
+
+RESTORE_KEEP_PREVIOUS=0 run_restore "$BK"
+check "RESTORE_KEEP_PREVIOUS=0 is refused before touching anything" bash -c "[ $RC -eq 1 ] && grep -q 'RESTORE_KEEP_PREVIOUS must be an integer >= 1' <<< \"\$1\"" _ "$OUT"
 
 echo
 echo "restore.sh (real PostgreSQL): $PASS passed, $FAIL failed"

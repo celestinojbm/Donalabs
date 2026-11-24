@@ -13,6 +13,10 @@
 #                          from the one in the backup's env.backup (the data it
 #                          protects will NOT be readable with the current key).
 #
+#   RESTORE_KEEP_PREVIOUS  (env or .env, default 2, integer >= 1) how many old
+#                          copies <db>__pre_restore_<timestamp> to keep per
+#                          database; older ones are dropped after a restore.
+#
 # Restores Postgres logical dumps and named-volume tarballs. The databases must
 # be running. Every file is integrity-checked BEFORE anything is touched, and the
 # encryption keys in .env are compared with the backup's env.backup: restored
@@ -21,9 +25,14 @@
 # the backup's keys.
 #
 #   Postgres: each dump is loaded into a temporary database with ON_ERROR_STOP
-#     in a single transaction, then swapped in by renaming. The live database is
-#     only replaced if the whole dump loaded; the previous one is kept as
-#     <db>__pre_restore_<timestamp> so the restore can be undone.
+#     in a single transaction, given the live database's own grants, settings,
+#     owner, connection limit and comment (a dump without --create does not
+#     carry them), then swapped in by renaming. The live database is only
+#     replaced if all of that worked; the previous one is kept as
+#     <db>__pre_restore_<timestamp> so the restore can be undone, and only the
+#     RESTORE_KEEP_PREVIOUS newest such copies are kept.
+#   Interrupted (Ctrl-C, SSH drop, kill, unexpected error): an exit trap reopens
+#     any database the restore had locked and drops its temporary database.
 #   Volumes: running containers that use the volume are stopped, the tarball is
 #     extracted into a staging dir inside the volume, and only then does it
 #     replace the old contents. If extraction fails the old data is untouched.
@@ -35,7 +44,7 @@
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
-usage() { sed -n '4,14p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '4,18p' "$0" | sed 's/^# \{0,1\}//'; }
 USAGE="usage: ./scripts/restore.sh backups/<timestamp> [--allow-incomplete] [--ignore-key-mismatch]"
 
 SRC="" ALLOW_INCOMPLETE=0 IGNORE_KEYS=0
@@ -52,6 +61,13 @@ done
 
 require_docker
 load_env
+
+# Validate retention BEFORE touching anything (as backup.sh does).
+KEEP_PREVIOUS="${RESTORE_KEEP_PREVIOUS:-2}"
+if ! [[ "$KEEP_PREVIOUS" =~ ^[0-9]+$ ]] || [ "$KEEP_PREVIOUS" -lt 1 ]; then
+  err "RESTORE_KEEP_PREVIOUS must be an integer >= 1 (got '${KEEP_PREVIOUS}')"
+  exit 1
+fi
 
 if [ -z "$SRC" ] || [ ! -d "$SRC" ]; then
   err "$USAGE"; exit 1
@@ -188,6 +204,72 @@ printf "Type 'yes' to continue: "; read -r ans
 STAMP="$(date -u +%Y%m%d%H%M%S)"
 FAILED=()
 
+# --- cleanup on interruption ----------------------------------------------------
+# What is in flight, for the exit trap. Set right BEFORE the step that needs
+# undoing, cleared right after it is settled.
+#   PG_INFLIGHT  "container|user|db|tmp|old": the dump is loading into tmp, or
+#                db is locked (ALLOW_CONNECTIONS false) for the swap
+#   VOL_INFLIGHT volume whose containers are stopped and whose contents are
+#                being replaced (state unknown if we stop here)
+PG_INFLIGHT="" VOL_INFLIGHT=""
+on_exit() {
+  local rc=$?
+  set +e                        # after an SSH drop even printing fails: keep cleaning
+  trap '' INT TERM HUP          # a second Ctrl-C must not cut the cleanup short
+  trap - EXIT
+  if [ -n "$PG_INFLIGHT" ]; then
+    local c u db tmp old
+    IFS='|' read -r c u db tmp old <<< "$PG_INFLIGHT"
+    err "interrupted while restoring $c ($db): undoing the in-flight step"
+    # Whichever side of the swap we stopped on, nothing may stay locked: the
+    # database called $db (old or restored) and the kept copy $old.
+    reopen_or_tell "$c" "$u" "$db" "$old" && ok "$c: '$db' accepts connections"
+    pg "$c" "$u" -c "DROP DATABASE IF EXISTS \"$tmp\"" >/dev/null 2>&1 \
+      || warn "$c: could not drop temporary database '$tmp' (the next restore drops it)"
+  fi
+  if [ -n "$VOL_INFLIGHT" ]; then
+    err "interrupted while restoring volume $VOL_INFLIGHT: its contents may be partial"
+    [ "${#stopped[@]}" -eq 0 ] \
+      || err "left STOPPED on purpose (check the volume, then: docker start ${stopped[*]})"
+  fi
+  if [ "$rc" -ne 0 ] && { [ -n "$PG_INFLIGHT" ] || [ -n "$VOL_INFLIGHT" ]; }; then
+    err "restore interrupted (exit $rc): NOT complete. Everything finished before this point stays restored."
+  fi
+  exit "$rc"
+}
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
+# Reopen databases $3... of container $1 (user $2); if that fails, say exactly
+# how to do it by hand. Never leaves a lock unreported.
+reopen_or_tell() {
+  local c="$1" u="$2" n; shift 2
+  pg "$c" "$u" -c "$(reopen_sql "$@")" >/dev/null 2>&1 && return 0
+  err "$c: could not make these databases accept connections again: $*. Run:"
+  for n in "$@"; do
+    err "  docker exec $c psql -U $u -d postgres -c 'ALTER DATABASE \"$n\" WITH ALLOW_CONNECTIONS true'"
+  done
+  return 1
+}
+
+# SQL that reopens the given databases if they exist and are locked (no error
+# if they do not exist: the trap does not know which side of the swap it is on).
+reopen_sql() {
+  local list="" n
+  for n in "$@"; do list+="${list:+, }'$n'"; done
+  cat <<SQL
+DO \$\$
+DECLARE n name;
+BEGIN
+  FOR n IN SELECT datname FROM pg_database WHERE datname IN ($list) AND NOT datallowconn LOOP
+    EXECUTE format('ALTER DATABASE %I WITH ALLOW_CONNECTIONS true', n);
+  END LOOP;
+END \$\$
+SQL
+}
+
 # Snapshot running containers once. Piping `docker ps` straight into `grep -q`
 # under pipefail can report "not running" when grep exits early (SIGPIPE).
 RUNNING="$(docker ps --format '{{.Names}}')"
@@ -204,6 +286,75 @@ pg() {
     -c "SET client_min_messages = warning" "$@"
 }
 
+# Give database $2 the database-level properties of $1: owner, connection
+# limit, comment, GRANTs ON DATABASE, ALTER DATABASE ... SET and ALTER ROLE ...
+# IN DATABASE ... SET. A plain pg_dump (no --create) carries none of them, and
+# the swap replaces the database they belong to. One DO block: all or nothing.
+copy_db_props_sql() {
+  cat <<SQL
+DO \$\$
+DECLARE
+  d pg_database%ROWTYPE;
+  dst CONSTANT text := '$2';
+  r record;
+  k text;
+  v text;
+  -- GUCs stored as a list of already-quoted identifiers ("\$user", public):
+  -- they are re-applied verbatim, not as one string (pg_dump's list).
+  listq CONSTANT text[] := ARRAY['local_preload_libraries', 'search_path',
+    'session_preload_libraries', 'shared_preload_libraries', 'temp_tablespaces',
+    'unix_socket_directories'];
+BEGIN
+  SELECT * INTO STRICT d FROM pg_database WHERE datname = '$1';
+  EXECUTE format('ALTER DATABASE %I OWNER TO %I', dst, pg_get_userbyid(d.datdba));
+  EXECUTE format('ALTER DATABASE %I CONNECTION LIMIT %s', dst, d.datconnlimit);
+  EXECUTE format('COMMENT ON DATABASE %I IS %L', dst, shobj_description(d.oid, 'pg_database'));
+  IF d.datacl IS NOT NULL THEN     -- NULL = defaults, which dst already has
+    EXECUTE format('REVOKE ALL ON DATABASE %I FROM PUBLIC', dst);
+    EXECUTE format('REVOKE ALL ON DATABASE %I FROM %I', dst, pg_get_userbyid(d.datdba));
+    FOR r IN SELECT * FROM aclexplode(d.datacl) LOOP
+      EXECUTE format('GRANT %s ON DATABASE %I TO %s%s', r.privilege_type, dst,
+        CASE WHEN r.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(r.grantee)) END,
+        CASE WHEN r.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END);
+    END LOOP;
+  END IF;
+  FOR r IN SELECT s.setrole, unnest(s.setconfig) AS kv
+             FROM pg_db_role_setting s WHERE s.setdatabase = d.oid LOOP
+    k := split_part(r.kv, '=', 1);
+    v := substr(r.kv, length(k) + 2);
+    v := CASE WHEN k <> ALL (listq) THEN quote_literal(v)
+              WHEN v = '""' THEN quote_literal('') ELSE v END;  -- SET search_path = ''
+    IF r.setrole = 0 THEN
+      EXECUTE format('ALTER DATABASE %I SET %I TO %s', dst, k, v);
+    ELSE
+      EXECUTE format('ALTER ROLE %I IN DATABASE %I SET %I TO %s',
+                     pg_get_userbyid(r.setrole), dst, k, v);
+    END IF;
+  END LOOP;
+END \$\$
+SQL
+}
+
+# Drop the oldest <db>__pre_restore_<14 digits> copies beyond KEEP_PREVIOUS. The
+# copy this run just made ($2) always counts as kept, whatever the clock says.
+# Only exact names are matched, and a copy someone is connected to is not forced.
+prune_old_copies() {
+  local container="$1" user="$2" db="$3" just_made="$4" prefix="${3}__pre_restore_" n
+  local names
+  names="$(pg "$container" "$user" -At -c "SELECT datname FROM pg_database
+      WHERE left(datname, length('$prefix')) = '$prefix'
+        AND substr(datname, length('$prefix') + 1) ~ '^[0-9]{14}\$'
+      ORDER BY datname = '$just_made' DESC, datname DESC OFFSET $KEEP_PREVIOUS")" \
+    || { warn "$container: could not list old copies of '$db' to prune"; return 0; }
+  for n in $names; do
+    if pg "$container" "$user" -c "DROP DATABASE \"$n\"" >/dev/null 2>&1; then
+      info "dropped old copy $n (RESTORE_KEEP_PREVIOUS=$KEEP_PREVIOUS)"
+    else
+      warn "could not drop old copy $n (in use?); drop it by hand once free"
+    fi
+  done
+}
+
 restore_pg() {
   local container="$1" user="$2" db="$3" dump="$4"
   local tmp="${db}__restoring" old="${db}__pre_restore_${STAMP}"
@@ -214,15 +365,22 @@ restore_pg() {
     err "$container: unsupported user/database name ('$user' / '$db')"; return 1
   fi
 
+  PG_INFLIGHT="$container|$user|$db|$tmp|$old"
   pg "$container" "$user" -c "DROP DATABASE IF EXISTS \"$tmp\"" \
                           -c "CREATE DATABASE \"$tmp\" OWNER \"$user\"" >/dev/null \
-    || { err "$container: could not create temporary database $tmp"; return 1; }
+    || { err "$container: could not create temporary database $tmp"; PG_INFLIGHT=""; return 1; }
 
   if ! gunzip -c "$dump" | docker exec -i "$container" \
          psql -U "$user" -d "$tmp" -X -q -v ON_ERROR_STOP=1 --single-transaction >/dev/null; then
     err "$container: the dump did not load cleanly; live database '$db' left untouched"
     pg "$container" "$user" -c "DROP DATABASE IF EXISTS \"$tmp\"" >/dev/null 2>&1 || true
-    return 1
+    PG_INFLIGHT=""; return 1
+  fi
+
+  if ! pg "$container" "$user" -c "$(copy_db_props_sql "$db" "$tmp")" >/dev/null; then
+    err "$container: could not give the restored database the grants/settings of '$db'; live database left untouched"
+    pg "$container" "$user" -c "DROP DATABASE IF EXISTS \"$tmp\"" >/dev/null 2>&1 || true
+    PG_INFLIGHT=""; return 1
   fi
 
   # Swap. New connections are refused first (committed on its own so it takes
@@ -230,20 +388,27 @@ restore_pg() {
   # transaction: either the restored database is live, or nothing changed.
   pg "$container" "$user" -c "ALTER DATABASE \"$db\" WITH ALLOW_CONNECTIONS false" >/dev/null \
     || { err "$container: could not lock database '$db' for the swap"
+         reopen_or_tell "$container" "$user" "$db" || true
          pg "$container" "$user" -c "DROP DATABASE IF EXISTS \"$tmp\"" >/dev/null 2>&1 || true
-         return 1; }
+         PG_INFLIGHT=""; return 1; }
   if ! pg "$container" "$user" -1 \
          -c "SELECT pg_terminate_backend(pid, 10000) FROM pg_stat_activity WHERE datname = '$db' AND pid <> pg_backend_pid()" \
          -c "ALTER DATABASE \"$db\" RENAME TO \"$old\"" \
          -c "ALTER DATABASE \"$tmp\" RENAME TO \"$db\"" >/dev/null; then
     err "$container: could not swap in the restored database; live database '$db' left untouched"
-    pg "$container" "$user" -c "ALTER DATABASE \"$db\" WITH ALLOW_CONNECTIONS true" >/dev/null 2>&1 || true
+    # A failed swap may still have committed (e.g. the connection dropped after
+    # COMMIT): reopen whichever of the two names exists.
+    reopen_or_tell "$container" "$user" "$db" "$old" || true
     pg "$container" "$user" -c "DROP DATABASE IF EXISTS \"$tmp\"" >/dev/null 2>&1 || true
-    return 1
+    PG_INFLIGHT=""; return 1
   fi
-  pg "$container" "$user" -c "ALTER DATABASE \"$old\" WITH ALLOW_CONNECTIONS true" >/dev/null 2>&1 || true
+  # The restored database is live. If only the undo copy stays locked, say how
+  # to open it; the restore itself succeeded.
+  reopen_or_tell "$container" "$user" "$old" || warn "$container: (the old copy is only needed to undo)"
+  PG_INFLIGHT=""
   ok "restored $container ($db); previous data kept as database '$old'"
   PREVIOUS_DBS+=("$container|$user|$old")
+  prune_old_copies "$container" "$user" "$db" "$old"
 }
 
 PREVIOUS_DBS=()
@@ -285,13 +450,14 @@ for vol in "${PLAN_VOL[@]+"${PLAN_VOL[@]}"}"; do
   # not be started at the end just because it mounts the volume.
   users="$(docker ps --filter "volume=$vol" --format '{{.Names}}')"
   stopped=() stop_failed=""
+  VOL_INFLIGHT="$vol"
   for c in $users; do
     if docker stop "$c" >/dev/null 2>&1; then stopped+=("$c"); else stop_failed="$c"; break; fi
   done
 
   if [ -n "$stop_failed" ]; then
     err "could not stop $stop_failed: volume $vol NOT restored (it is still in use)"
-    restart_stopped; FAILED+=("volume $vol"); continue
+    restart_stopped; VOL_INFLIGHT=""; FAILED+=("volume $vol"); continue
   fi
 
   rc=0
@@ -304,6 +470,7 @@ for vol in "${PLAN_VOL[@]+"${PLAN_VOL[@]}"}"; do
        [ "${#stopped[@]}" -eq 0 ] || err "left STOPPED on purpose so they do not run on partial data: ${stopped[*]}"
        FAILED+=("volume $vol (partial, containers left stopped)") ;;
   esac
+  VOL_INFLIGHT=""
 done
 
 # --- 6. Verdict -----------------------------------------------------------------
@@ -317,4 +484,6 @@ for p in "${PREVIOUS_DBS[@]+"${PREVIOUS_DBS[@]}"}"; do
   IFS='|' read -r c u old <<< "$p"
   info "once verified, free the old copy: docker exec $c psql -U $u -d postgres -c 'DROP DATABASE \"$old\"'"
 done
+[ "${#PREVIOUS_DBS[@]}" -eq 0 ] \
+  || info "(older copies beyond RESTORE_KEEP_PREVIOUS=$KEEP_PREVIOUS per database are dropped automatically)"
 ok "restore complete. Verify with: ./scripts/health.sh"

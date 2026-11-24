@@ -24,7 +24,28 @@
 #                      refused, so a buggy script cannot delete host files.
 #                      Unset: `docker run` only writes a placeholder tarball.
 #   FAKE_LOG           file every invocation is appended to (one line per call)
+#   FAKE_KILL_ON       ERE; the first call whose arguments match it runs normally
+#                      and then sends SIGTERM to the calling script ($PPID), as
+#                      if the restore were interrupted right there (Ctrl-C, SSH
+#                      drop, kill). Fires once: needs FAKE_LOG ($FAKE_LOG.killed
+#                      marks it as fired)
+#   FAKE_FAIL_ON       ERE; every call whose arguments match it does nothing and
+#                      exits 1 (e.g. a psql -c that fails)
 set -euo pipefail
+
+if [ -n "${FAKE_FAIL_ON:-}" ] && [[ "$*" =~ $FAKE_FAIL_ON ]]; then
+  [ -n "${FAKE_LOG:-}" ] && printf 'FAILED %s\n' "$*" >> "$FAKE_LOG"
+  [ "${1:-}" = exec ] && [ "${2:-}" = -i ] && cat >/dev/null   # drain stdin
+  echo "fake docker: failing on purpose" >&2; exit 1
+fi
+
+if [ -n "${FAKE_KILL_ON:-}" ] && [[ "$*" =~ $FAKE_KILL_ON ]] && [ ! -e "${FAKE_LOG:?FAKE_KILL_ON needs FAKE_LOG}.killed" ]; then
+  : > "$FAKE_LOG.killed"
+  rc=0
+  FAKE_KILL_ON="" "$0" "$@" || rc=$?
+  kill -TERM "$PPID" 2>/dev/null || true
+  exit "$rc"
+fi
 
 [ -n "${FAKE_LOG:-}" ] && printf '%s\n' "$*" >> "$FAKE_LOG"
 

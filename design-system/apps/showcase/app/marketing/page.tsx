@@ -70,9 +70,11 @@ export default function MarketingPage() {
       />
 
       <Section title="Hero background (Particles)">
-        <div className="relative flex h-48 items-center justify-center overflow-hidden rounded-xl border bg-background">
+        <div className="relative flex min-h-52 items-center justify-center overflow-hidden rounded-xl border bg-background px-4 py-8">
           <Particles className="absolute inset-0" quantity={80} ease={80} color="#888888" refresh />
-          <ShinyButton>Explore the platform</ShinyButton>
+          <ShinyButton className="relative z-10 max-w-full min-w-0 px-5 py-3 whitespace-normal">
+            Explore the platform
+          </ShinyButton>
         </div>
       </Section>
 

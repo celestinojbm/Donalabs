@@ -44,8 +44,8 @@ export function AppSidebar() {
           <SidebarMenuItem>
             <SidebarMenuButton size="lg" asChild>
               <Link href="/">
-                <div className="flex size-8 items-center justify-center rounded-md bg-primary text-primary-foreground">
-                  <span className="text-sm font-semibold">D</span>
+                <div className="flex size-10 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground group-data-[collapsible=icon]:size-8">
+                  <span className="text-base font-semibold">D</span>
                 </div>
                 <div className="flex flex-col gap-0.5 leading-none">
                   <span className="font-semibold">DonaLabs</span>
@@ -86,7 +86,7 @@ export function AppSidebar() {
                   <Link href="/evaluated">
                     <SquareDashedMousePointer />
                     <span>Evaluated libraries</span>
-                    <Badge variant="secondary" className="ml-auto text-[10px]">
+                    <Badge variant="secondary" className="ml-auto">
                       3
                     </Badge>
                   </Link>
@@ -97,7 +97,7 @@ export function AppSidebar() {
         </SidebarGroup>
       </SidebarContent>
       <SidebarFooter>
-        <div className="px-2 py-1.5 text-xs text-muted-foreground group-data-[collapsible=icon]:hidden">
+        <div className="px-2 py-2 text-sm text-muted-foreground group-data-[collapsible=icon]:hidden">
           Tailwind v4 · shadcn/ui · Radix · Motion
         </div>
       </SidebarFooter>

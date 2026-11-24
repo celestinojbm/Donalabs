@@ -34,52 +34,88 @@ require_env() {
   fi
 }
 
+# One .env line -> ENV_LINE_KEY / ENV_LINE_VAL, the way Docker Compose reads it,
+# so the scripts see the same values as the containers (checked against
+# `docker compose config` in tests/lib.test.sh). Returns 1 for blank lines,
+# comments and anything that is not KEY=VALUE. Never shell-evaluates the value.
+#   * CRLF line endings, leading indentation, an `export ` prefix and spaces
+#     around `=` are accepted.
+#   * Unquoted value: surrounding whitespace is trimmed and an inline comment
+#     (` #` and everything after it) is dropped; `a#b` stays `a#b`.
+#   * 'single quotes': literal up to the closing quote.
+#   * "double quotes": up to the closing quote, with \\ \" \n \t \r \$ escapes.
+#   * Whatever follows the closing quote (e.g. a comment) is ignored.
+# Not supported (Compose does them, these scripts do not): ${VAR} interpolation
+# inside values and multi-line quoted values. An unterminated quote, which makes
+# Compose itself refuse the file, is kept literally.
+env_parse_line() {
+  local line="${1%$'\r'}" val out="" c i
+  [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=(.*)$ ]] || return 1
+  ENV_LINE_KEY="${BASH_REMATCH[2]}"
+  val="${BASH_REMATCH[3]}"
+  val="${val#"${val%%[![:space:]]*}"}"
+  case "$val" in
+    \'*\'*)
+      val="${val#\'}"; val="${val%%\'*}" ;;
+    \"*)
+      for (( i = 1; i < ${#val}; i++ )); do
+        c="${val:i:1}"
+        if [ "$c" = '"' ]; then ENV_LINE_VAL="$out"; return 0; fi
+        if [ "$c" = "\\" ] && [ $(( i + 1 )) -lt ${#val} ]; then
+          i=$(( i + 1 ))
+          case "${val:i:1}" in
+            n) c=$'\n' ;; t) c=$'\t' ;; r) c=$'\r' ;;
+            "\\"|'"'|'$') c="${val:i:1}" ;;
+            *) c="\\${val:i:1}" ;;
+          esac
+        fi
+        out+="$c"
+      done
+      val="${val%"${val##*[![:space:]]}"}" ;;   # unterminated: literal
+    *)
+      val="${val%% #*}"
+      val="${val%"${val##*[![:space:]]}"}" ;;
+  esac
+  ENV_LINE_VAL="$val"
+}
+
 # Load .env into the environment WITHOUT shell-evaluating it (values may contain
-# spaces, e.g. PENPOT_FLAGS). Mirrors how Compose parses .env: literal KEY=VALUE.
+# spaces, e.g. PENPOT_FLAGS), parsed by env_parse_line. Last assignment wins.
 load_env() {
   require_env
-  local line key val
+  local line
   while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in ''|\#*) continue ;; esac
-    [[ "$line" == *=* ]] || continue
-    key="${line%%=*}"
-    val="${line#*=}"
-    # strip one layer of surrounding single or double quotes
-    case "$val" in
-      \"*\") val="${val%\"}"; val="${val#\"}" ;;
-      \'*\') val="${val%\'}"; val="${val#\'}" ;;
-    esac
-    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] && export "$key=$val"
+    env_parse_line "$line" || continue
+    export "$ENV_LINE_KEY=$ENV_LINE_VAL"
   done < "$ENV_FILE"
 }
 
-# Print the value KEY has in env FILE, parsed as load_env does (literal, last
-# assignment wins, one layer of quotes stripped). It also tolerates CRLF and an
-# `export ` prefix, so two copies of the same .env that differ only in format
-# compare equal. Returns 1 (prints nothing) if KEY is not assigned in FILE.
+# Print the value KEY has in env FILE, parsed as load_env does (env_parse_line,
+# last assignment wins), so two copies of the same .env that differ only in
+# format compare equal. Returns 1 (prints nothing) if KEY is not assigned in FILE.
 #   if v="$(env_get "$f" KEY)"; then ...; fi     # never bare under set -e
 env_get() {
-  local file="$1" want="$2" line val found=1 out=""
+  local file="$1" want="$2" line found=1 out=""
   while IFS= read -r line || [ -n "$line" ]; do
-    line="${line%$'\r'}"
-    [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]] || continue
-    [ "${BASH_REMATCH[2]}" = "$want" ] || continue
-    val="${BASH_REMATCH[3]}"
-    case "$val" in
-      \"*\") val="${val%\"}"; val="${val#\"}" ;;
-      \'*\') val="${val%\'}"; val="${val#\'}" ;;
-    esac
-    out="$val" found=0
+    env_parse_line "$line" || continue
+    [ "$ENV_LINE_KEY" = "$want" ] || continue
+    out="$ENV_LINE_VAL" found=0
   done < "$file"
   [ "$found" -eq 0 ] && printf '%s' "$out"
   return "$found"
 }
 
 # --- shared network ----------------------------------------------------------
-edge_network() { grep -E '^EDGE_NETWORK=' "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2 || echo "donalabs_edge"; }
+# EDGE_NETWORK from .env, or the default when it is unset, empty or there is no
+# .env yet. Parsed like Compose does: a CRLF .env must not yield "name\r".
+edge_network() {
+  local net=""
+  [ -f "$ENV_FILE" ] && net="$(env_get "$ENV_FILE" EDGE_NETWORK)" || true
+  printf '%s\n' "${net:-donalabs_edge}"
+}
 
 ensure_network() {
-  local net; net="$(edge_network)"; net="${net:-donalabs_edge}"
+  local net; net="$(edge_network)"
   if ! docker network inspect "$net" >/dev/null 2>&1; then
     docker network create "$net" >/dev/null
     ok "created shared network '$net'"

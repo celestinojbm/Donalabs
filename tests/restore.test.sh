@@ -81,7 +81,8 @@ run_restore() {
   if [ "$answer" = "<EOF>" ]; then
     OUT="$(PATH="$SB/bin:$PATH" "$SB/scripts/restore.sh" "$@" 2>&1 < /dev/null)"
   else
-    OUT="$(PATH="$SB/bin:$PATH" "$SB/scripts/restore.sh" "$@" 2>&1 <<< "$answer")"
+    # shellcheck disable=SC2086  # RUN_WRAP is a command prefix (word splitting intended)
+    OUT="$(PATH="$SB/bin:$PATH" ${RUN_WRAP:-} "$SB/scripts/restore.sh" "$@" 2>&1 <<< "$answer")"
   fi
   RC=$?
   set -e
@@ -538,29 +539,42 @@ check "killed during a volume: no database trap action" not grep -q 'ALLOW_CONNE
 check "killed during a volume: does not say restore complete" not grep -q 'restore complete' <<< "$OUT"
 
 # Output piped and its reader gone (`2>&1 | tee log`, then the SSH session
-# drops): printing raises SIGPIPE. The trap must still run and reopen.
-new_sandbox
-take_backup
-rm -f "$FAKE_LOG.killed"; : > "$FAKE_LOG"
-FIFO="$SB/out.fifo"; rm -f "$FIFO"; mkfifo "$FIFO"
-cat "$FIFO" > "$SB/out.txt" & READER=$!
-set +e
-FAKE_KILL_ON='^exec donalabs-n8n-db psql .*"n8n" WITH ALLOW_CONNECTIONS false' \
-  FAKE_KILL_FIRST="kill $READER" FAKE_KILL_SIG=HUP \
-  PATH="$SB/bin:$PATH" "$SB/scripts/restore.sh" "$BK" > "$FIFO" 2>&1 <<< yes; RC=$?
-set -e
-wait "$READER" 2>/dev/null || true; rm -f "$FIFO" "$FAKE_LOG.killed"
-flatten_log
-check "SSH drop with output piped (reader gone): the trap still reopens n8n" \
-  grep -q "^exec donalabs-n8n-db psql .*datname IN ('n8n', 'n8n__pre_restore_[0-9]*') AND NOT datallowconn" "$FLAT"
-check "SSH drop with output piped (reader gone): and drops the temporary database" \
-  bash -c "tail -1 '$FLAT' | grep -q 'DROP DATABASE IF EXISTS \"n8n__restoring\" WITH (FORCE)'"
-check "SSH drop with output piped (reader gone): exit 129 (SIGHUP)" [ "$RC" -eq 129 ]
+# drops): printing raises SIGPIPE, or fails with EPIPE where SIGPIPE was already
+# ignored when the script started (bash cannot trap or reset such a signal; the
+# GitHub runner starts processes that way). The trap must run and reopen in
+# both. `env --default-signal=PIPE` gives the script the default disposition
+# an interactive SSH session has, whatever this test was started with.
+DEFAULT_PIPE="env --default-signal=PIPE"
+$DEFAULT_PIPE true 2>/dev/null || DEFAULT_PIPE=""   # coreutils < 8.31: run as is
+for mode in default ignored; do
+  wrap=""
+  if [ "$mode" = default ]; then wrap="$DEFAULT_PIPE"; else wrap="bash -c 'trap \"\" PIPE; exec \"\$0\" \"\$@\"'"; fi
+  new_sandbox
+  take_backup
+  rm -f "$FAKE_LOG.killed"; : > "$FAKE_LOG"
+  FIFO="$SB/out.fifo"; rm -f "$FIFO"; mkfifo "$FIFO"
+  cat "$FIFO" > "$SB/out.txt" & READER=$!
+  set +e
+  # (a subshell: an assignment in front of `eval`, a special builtin, would stick)
+  ( export FAKE_KILL_ON='^exec donalabs-n8n-db psql .*"n8n" WITH ALLOW_CONNECTIONS false' \
+      FAKE_KILL_FIRST="kill $READER" FAKE_KILL_SIG=HUP PATH="$SB/bin:$PATH"
+    eval "$wrap" '"$SB/scripts/restore.sh" "$BK"' ) > "$FIFO" 2>&1 <<< yes; RC=$?
+  set -e
+  wait "$READER" 2>/dev/null || true; rm -f "$FIFO" "$FAKE_LOG.killed"
+  flatten_log
+  check "SSH drop, output piped, reader gone (SIGPIPE $mode): the trap still reopens n8n" \
+    grep -q "^exec donalabs-n8n-db psql .*datname IN ('n8n', 'n8n__pre_restore_[0-9]*') AND NOT datallowconn" "$FLAT"
+  check "SSH drop, output piped, reader gone (SIGPIPE $mode): and drops the temporary database" \
+    bash -c "tail -1 '$FLAT' | grep -q 'DROP DATABASE IF EXISTS \"n8n__restoring\" WITH (FORCE)'"
+  check "SSH drop, output piped, reader gone (SIGPIPE $mode): exit 129 (SIGHUP)" [ "$RC" -eq 129 ]
+done
 
 # SIGPIPE itself (the reader died while the restore was running): same cleanup.
+# Only meaningful with SIGPIPE's default disposition (see above).
 new_sandbox
 take_backup
-FAKE_KILL_SIG=PIPE interrupt_at '^exec donalabs-n8n-db psql .*"n8n" WITH ALLOW_CONNECTIONS false'
+[ -n "$DEFAULT_PIPE" ] || fail "env --default-signal (coreutils >= 8.31) is needed for the SIGPIPE checks"
+FAKE_KILL_SIG=PIPE RUN_WRAP="$DEFAULT_PIPE" interrupt_at '^exec donalabs-n8n-db psql .*"n8n" WITH ALLOW_CONNECTIONS false'
 flatten_log
 check "SIGPIPE after locking n8n: the trap reopens it" \
   grep -q "^exec donalabs-n8n-db psql .*datname IN ('n8n', 'n8n__pre_restore_[0-9]*') AND NOT datallowconn" "$FLAT"

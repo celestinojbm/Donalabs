@@ -200,6 +200,9 @@ fi
 # Every session the restore opens carries an application_name, so the exit trap
 # can wait for statements that outlive their (killed) `docker exec` client.
 APP=donalabs-restore
+# PG_APP only ever comes from `PG_APP=... pg`: load_env exports every .env key,
+# and an inherited value would hide this restore's sessions from that wait.
+unset PG_APP
 pg() {
   local c="$1" u="$2"; shift 2
   docker exec "$c" psql -U "$u" -d "dbname=postgres application_name=${PG_APP:-$APP}" \
@@ -563,7 +566,8 @@ for vol in "${PLAN_VOL[@]+"${PLAN_VOL[@]}"}"; do
   case "$rc" in
     0) VOL_PHASE=restarting; ok "restored volume $vol"; restart_stopped ;;
     3) VOL_PHASE=restarting; err "extracting $tarname failed; volume $vol left as it was"; restart_stopped; FAILED+=("volume $vol") ;;
-    *) VOL_PHASE=""
+    *) # VOL_PHASE stays "replacing": the contents may be partial, so a signal
+       # from here on (SIGPIPE on the next message) must not start its users.
        err "restore of volume $vol failed midway (exit $rc): its contents may be partial"
        [ "${#stopped[@]}" -eq 0 ] || err "left STOPPED on purpose so they do not run on partial data: ${stopped[*]}"
        FAILED+=("volume $vol (partial, containers left stopped)") ;;

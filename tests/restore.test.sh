@@ -538,6 +538,31 @@ check "killed during a volume: its container is not started" not grep -qx 'start
 check "killed during a volume: no database trap action" not grep -q 'ALLOW_CONNECTIONS true' <<< "$(grep -n . "$FAKE_LOG" | tail -3)"
 check "killed during a volume: does not say restore complete" not grep -q 'restore complete' <<< "$OUT"
 
+# A volume that failed midway (state unknown) and THEN a signal, before the
+# loop moves on: here SIGPIPE from the first message after the failure, because
+# the reader of the output is gone (`2>&1 | tee log`, then the SSH session
+# drops). The trap must still treat the volume as possibly partial and leave
+# its containers stopped, as the no-signal path does.
+new_sandbox
+take_backup
+if command -v env >/dev/null && env --default-signal=PIPE true 2>/dev/null; then
+  rm -f "$FAKE_LOG.killed"; : > "$FAKE_LOG"
+  FIFO="$SB/out.fifo"; rm -f "$FIFO"; mkfifo "$FIFO"
+  cat "$FIFO" > "$SB/out.txt" & READER=$!
+  set +e
+  ( export FAKE_TAR_FAIL=donalabs_penpot_assets \
+      FAKE_KILL_ON='^run .* -v donalabs_penpot_assets:/dst ' \
+      FAKE_KILL_FIRST="kill $READER" FAKE_KILL_SIG=0 PATH="$SB/bin:$PATH"
+    env --default-signal=PIPE "$SB/scripts/restore.sh" "$BK" ) > "$FIFO" 2>&1 <<< yes; RC=$?
+  set -e
+  wait "$READER" 2>/dev/null || true; rm -f "$FIFO" "$FAKE_LOG.killed"
+  check "volume failed midway, then SIGPIPE: exit 141" [ "$RC" -eq 141 ]
+  check "volume failed midway, then SIGPIPE: its containers are left stopped" \
+    bash -c "! grep -Eqx 'start donalabs-penpot-(frontend|backend)' '$FAKE_LOG'"
+else
+  fail "env --default-signal (coreutils >= 8.31) is needed for the SIGPIPE checks"
+fi
+
 # Output piped and its reader gone (`2>&1 | tee log`, then the SSH session
 # drops): printing raises SIGPIPE, or fails with EPIPE where SIGPIPE was already
 # ignored when the script started (bash cannot trap or reset such a signal; the
@@ -586,6 +611,16 @@ check "trap: waits for other sessions of this restore before reopening" \
   bash -c "w=\$(grep -n \"application_name = 'donalabs-restore' AND pid <> pg_backend_pid()\" '$FLAT' | head -1 | cut -d: -f1); r=\$(grep -n \"datname IN ('n8n', 'n8n__pre_restore_\" '$FLAT' | head -1 | cut -d: -f1); [ -n \"\$w\" ] && [ -n \"\$r\" ] && [ \"\$w\" -lt \"\$r\" ]"
 check "trap: verifies nothing is still locked after reopening" \
   grep -q "^exec donalabs-n8n-db psql .*string_agg(datname, ' ').* AND NOT datallowconn" "$FLAT"
+
+# The trap finds this restore's sessions by application_name. load_env exports
+# every .env key, so a PG_APP there (or inherited) must not rename them.
+new_sandbox
+take_backup
+echo 'PG_APP=something-else' >> "$SB/.env"
+PG_APP=inherited run_restore yes "$BK"
+check "PG_APP in .env/environment: restore still succeeds" [ "$RC" -eq 0 ]
+check "PG_APP in .env/environment: sessions keep application_name=donalabs-restore" \
+  bash -c "grep -q 'application_name=donalabs-restore ' '$FAKE_LOG' && ! grep -Eq 'application_name=(something-else|inherited)' '$FAKE_LOG'"
 
 # Killed while STOPPING a volume's containers: the volume was not touched, so
 # they are started again (only "replacing" leaves them stopped).

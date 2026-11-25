@@ -212,6 +212,8 @@ eq "killed after the lock: no database left refusing connections" "" "$(locked_d
 eq "killed after the lock: live calendso untouched" "$BEFORE" "$(snapshot calcom calendso)"
 check "killed after the lock: no temporary database left" not_exists_tmp calendso
 eq "killed after the lock: no old copy made" "0" "$(old_copies calendso)"
+check "killed after the lock: says the swap did not happen" grep -q "'calendso' still holds its previous data" <<< "$OUT"
+check "killed after the lock: 'accepts connections' only after checking" grep -q "'calendso' accepts connections (checked)" <<< "$OUT"; printf '%s\n' "$OUT" | grep -A30 'Type' | sed 's/^/        | /'
 
 # 3b. Killed right after the swap committed, before the old copy was reopened.
 drop_old_copies; damage
@@ -220,15 +222,46 @@ check "killed after the swap: exits non-zero" [ "$RC" -ne 0 ]
 eq "killed after the swap: no database left refusing connections" "" "$(locked_dbs)"
 eq "killed after the swap: restored data is live" "$ORIG" "$(snapshot calcom calendso)"
 eq "killed after the swap: old copy kept and reopened" "1" "$(old_copies calendso)"
+check "killed after the swap: says the swap completed" grep -q "swap completed: 'calendso' now holds the restored data" <<< "$OUT"
 
 # 3c. Killed while the dump was loading into the temporary database.
 drop_old_copies; damage
 BEFORE="$(snapshot n8n n8n)"
-interrupt_at 'donalabs-n8n-db psql .* -d n8n__restoring .*--single-transaction'
+interrupt_at 'donalabs-n8n-db psql .* -d dbname=n8n__restoring .*--single-transaction'
 check "killed during the load: exits non-zero" [ "$RC" -ne 0 ]
 eq "killed during the load: live n8n untouched" "$BEFORE" "$(snapshot n8n n8n)"
 check "killed during the load: temporary database dropped" not_exists_tmp n8n
 eq "killed during the load: no database left refusing connections" "" "$(locked_dbs)"
+
+# 3d/3e. With a real `docker exec`, killing the client does not stop the psql
+# inside the container: its statement may still be running (uncommitted) when
+# the trap runs. FAKE_DETACH_ON reproduces that. The trap must wait for it and
+# only then reopen, and never report "accepts connections" while it is not.
+detach_at() {   # <ERE of the docker call> -> restore.sh, that call left running
+  rm -f "$FAKE_LOG.killed"
+  FAKE_DETACH_ON="$1" run_restore "$BK"
+  rm -f "$FAKE_LOG.killed"
+  # Give the detached session time to COMMIT (it sleeps 2 s) before checking.
+  for _ in $(seq 100); do
+    [ "$(q postgres postgres -c "SELECT count(*) FROM pg_stat_activity WHERE query LIKE '%fake-detached-%' AND pid <> pg_backend_pid()")" = 0 ] && break
+    sleep 0.1
+  done
+}
+drop_old_copies; damage
+BEFORE="$(snapshot calcom calendso)"
+detach_at 'donalabs-calcom-db .*"calendso" WITH ALLOW_CONNECTIONS false'
+eq "lock still running in the container: no database left refusing connections" "" "$(locked_dbs)"
+check "lock still running in the container: no false 'accepts connections'" \
+  bash -c "[ -z \"\$1\" ] || grep -q \"'calendso' accepts connections\" <<< \"\$2\"" _ "$(locked_dbs)" "$OUT"
+eq "lock still running in the container: live calendso untouched" "$BEFORE" "$(snapshot calcom calendso)"
+
+drop_old_copies; damage
+detach_at 'donalabs-calcom-db .* -1 .*RENAME TO "calendso"'
+eq "swap still running in the container: no database left refusing connections" "" "$(locked_dbs)"
+eq "swap still running in the container: it completed, restored data is live" "$ORIG" "$(snapshot calcom calendso)"
+eq "swap still running in the container: old copy kept" "1" "$(old_copies calendso)"
+check "swap still running in the container: the trap says the swap completed" \
+  grep -q "swap completed: 'calendso' now holds the restored data" <<< "$OUT"
 
 # A plain restore afterwards works (nothing left behind blocks it).
 drop_old_copies
@@ -283,7 +316,7 @@ eq "search_path setting still works in a new session" '"$user", public, "Odd, sc
 # An empty list setting (SET search_path = '') is stored as "" and needs care.
 q postgres postgres -c "ALTER DATABASE plausible_db SET search_path = ''"
 run_restore "$BK"
-check "empty search_path setting is copied too (exit 0)" [ "$RC" -eq 0 ]
+check "empty search_path setting is copied too (exit 0)" [ "$RC" -eq 0 ]; [ "$RC" -eq 0 ] || printf "%s\n" "$OUT" | sed "s/^/        | /"
 eq "empty search_path carried over" '""' "$(q plausible plausible_db -c "SHOW search_path")"
 q postgres postgres -c "ALTER DATABASE plausible_db RESET search_path"
 
@@ -296,6 +329,13 @@ for e in $DBS; do
   eq "$d: only the 2 newest old copies are kept" "2" "$(old_copies "$d")"
 done
 check "pruning is reported" grep -q 'dropped old copy calendso__pre_restore_' <<< "$OUT"
+# ... and announced BEFORE the confirmation, by name.
+TO_DROP="$(q postgres postgres -c "SELECT min(datname) FROM pg_database WHERE datname LIKE 'calendso\_\_pre\_restore\_%'")"
+run_restore_answer() { local a="$1"; shift; set +e; OUT="$(PATH="$SB/bin:$PATH" "$SB/scripts/restore.sh" "$@" 2>&1 <<< "$a")"; RC=$?; set -e; }
+run_restore_answer no "$BK"
+check "before the prompt: names the old copy that will be dropped" \
+  bash -c "printf '%s\n' \"\$1\" | sed -n \"/Type 'yes'/q;p\" | grep -q \"will drop old copy $TO_DROP\"" _ "$OUT"
+eq "answering no: nothing was dropped" "2" "$(old_copies calendso)"
 NEWEST="$(q postgres postgres -c "SELECT max(datname) FROM pg_database WHERE datname LIKE 'calendso\_\_pre\_restore\_%'")"
 RESTORE_KEEP_PREVIOUS=1 run_restore "$BK"
 check "RESTORE_KEEP_PREVIOUS=1: restore exits 0" [ "$RC" -eq 0 ]

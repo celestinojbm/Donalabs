@@ -13,7 +13,7 @@
 #                          from the one in the backup's env.backup (the data it
 #                          protects will NOT be readable with the current key).
 #
-#   RESTORE_KEEP_PREVIOUS  (env or .env, default 2, integer >= 1) how many old
+#   RESTORE_KEEP_PREVIOUS  (env or .env, default 2, integer 1-9999) how many old
 #                          copies <db>__pre_restore_<timestamp> to keep per
 #                          database; older ones are dropped after a restore.
 #
@@ -31,8 +31,11 @@
 #     replaced if all of that worked; the previous one is kept as
 #     <db>__pre_restore_<timestamp> so the restore can be undone, and only the
 #     RESTORE_KEEP_PREVIOUS newest such copies are kept.
-#   Interrupted (Ctrl-C, SSH drop, kill, unexpected error): an exit trap reopens
-#     any database the restore had locked and drops its temporary database.
+#   Interrupted (Ctrl-C, SSH drop, kill, closed output pipe, unexpected error):
+#     an exit trap waits for statements still running in the container (a real
+#     `docker exec` keeps them going after its client dies), reopens any
+#     database the restore had locked, checks it, says which side of the swap it
+#     stopped on and drops its temporary database. kill -9 cannot be trapped.
 #   Volumes: running containers that use the volume are stopped, the tarball is
 #     extracted into a staging dir inside the volume, and only then does it
 #     replace the old contents. If extraction fails the old data is untouched.
@@ -64,8 +67,8 @@ load_env
 
 # Validate retention BEFORE touching anything (as backup.sh does).
 KEEP_PREVIOUS="${RESTORE_KEEP_PREVIOUS:-2}"
-if ! [[ "$KEEP_PREVIOUS" =~ ^[0-9]+$ ]] || [ "$KEEP_PREVIOUS" -lt 1 ]; then
-  err "RESTORE_KEEP_PREVIOUS must be an integer >= 1 (got '${KEEP_PREVIOUS}')"
+if ! [[ "$KEEP_PREVIOUS" =~ ^[0-9]{1,4}$ ]] || [ "$KEEP_PREVIOUS" -lt 1 ]; then
+  err "RESTORE_KEEP_PREVIOUS must be an integer >= 1 and <= 9999 (got '${KEEP_PREVIOUS}')"
   exit 1
 fi
 
@@ -194,8 +197,41 @@ if [ "${#mismatched[@]}" -gt 0 ]; then
   warn "--ignore-key-mismatch: restoring anyway; the data above will NOT be readable with the current .env"
 fi
 
+# Every session the restore opens carries an application_name, so the exit trap
+# can wait for statements that outlive their (killed) `docker exec` client.
+APP=donalabs-restore
+pg() {
+  local c="$1" u="$2"; shift 2
+  docker exec "$c" psql -U "$u" -d "dbname=postgres application_name=${PG_APP:-$APP}" \
+    -X -q -v ON_ERROR_STOP=1 -c "SET client_min_messages = warning" "$@"
+}
+
+# SQL listing the <db>__pre_restore_<14 digits> copies beyond the newest $2
+# (exact names only), the copy named $3 always counted first as kept.
+old_copies_sql() {
+  local prefix="${1}__pre_restore_"
+  printf '%s' "SELECT datname FROM pg_database
+      WHERE left(datname, length('$prefix')) = '$prefix'
+        AND substr(datname, length('$prefix') + 1) ~ '^[0-9]{14}\$'
+      ORDER BY datname = '${3:-}' DESC, datname DESC OFFSET $2"
+}
+
 info "will restore from: $SRC"
 for entry in "${PLAN_PG[@]+"${PLAN_PG[@]}"}"; do info "  database ${entry%%:*}"; done
+# Pruning deletes data: say what it will drop BEFORE asking (read-only query;
+# the new copy will take one of the RESTORE_KEEP_PREVIOUS slots).
+RUNNING_NOW="$(docker ps --format '{{.Names}}')"
+for entry in "${PLAN_PG[@]+"${PLAN_PG[@]}"}"; do
+  IFS=: read -r container uvar dvar <<< "$entry"
+  grep -qx -- "$container" <<< "$RUNNING_NOW" || continue
+  u="${!uvar:-}" d="${!dvar:-}"
+  [[ "$u" =~ ^[A-Za-z_][A-Za-z0-9_-]*$ && "$d" =~ ^[A-Za-z_][A-Za-z0-9_-]*$ ]] || continue
+  for n in $(PG_APP="$APP-plan" pg "$container" "$u" -At -c "$(old_copies_sql "$d" "$((KEEP_PREVIOUS - 1))")" 2>/dev/null); do
+    warn "  will drop old copy $n (RESTORE_KEEP_PREVIOUS=$KEEP_PREVIOUS)"
+  done
+done
+[ "$KEEP_PREVIOUS" -ne 1 ] || [ "${#PLAN_PG[@]}" -eq 0 ] \
+  || warn "RESTORE_KEEP_PREVIOUS=1: if this restore turns out wrong, a second attempt drops the only copy of the data from before the first one"
 for vol in "${PLAN_VOL[@]+"${PLAN_VOL[@]}"}"; do info "  volume   $vol"; done
 warn "This will OVERWRITE current data from: $SRC"
 printf "Type 'yes' to continue: "; read -r ans
@@ -209,28 +245,63 @@ FAILED=()
 # undoing, cleared right after it is settled.
 #   PG_INFLIGHT  "container|user|db|tmp|old": the dump is loading into tmp, or
 #                db is locked (ALLOW_CONNECTIONS false) for the swap
-#   VOL_INFLIGHT volume whose containers are stopped and whose contents are
-#                being replaced (state unknown if we stop here)
-PG_INFLIGHT="" VOL_INFLIGHT=""
+#   VOL_INFLIGHT volume being restored; VOL_PHASE says where:
+#                stopping   its containers are being stopped (volume intact)
+#                replacing  its contents are being replaced (may be partial)
+#                restarting it was restored, or left as it was, and its
+#                           containers are being started again
+PG_INFLIGHT="" VOL_INFLIGHT="" VOL_PHASE="" VOL_USERS=""
+# Bash runs a trap inside the command it interrupted, WITH that command's
+# redirections: a signal during `pg ... >/dev/null 2>&1` would send every
+# message of the trap (including the commands to run by hand) to /dev/null.
+# Keep the real stdout/stderr on fds 8/9 and go back to them in the trap.
+exec 8>&1 9>&2
 on_exit() {
   local rc=$?
+  exec 1>&8 2>&9
   set +e                        # after an SSH drop even printing fails: keep cleaning
-  trap '' INT TERM HUP          # a second Ctrl-C must not cut the cleanup short
+  # A second Ctrl-C must not cut the cleanup short, nor a SIGPIPE: with the
+  # output piped (`... 2>&1 | tee log`) an SSH drop kills the reader, and the
+  # first message printed here would otherwise kill the script before reopening.
+  trap '' INT TERM HUP PIPE
   trap - EXIT
   if [ -n "$PG_INFLIGHT" ]; then
-    local c u db tmp old
+    local c u db tmp old side
     IFS='|' read -r c u db tmp old <<< "$PG_INFLIGHT"
     err "interrupted while restoring $c ($db): undoing the in-flight step"
+    # With a real `docker exec`, killing the client does NOT stop the psql in
+    # the container: a lock or swap may still be running, uncommitted. Reopen
+    # only once no other session of this restore is left, or the reopen sees
+    # the database still open (MVCC) and the lock lands right after it.
+    wait_for_restore_sessions "$c" "$u"
+    side="$(pg "$c" "$u" -At -c "SELECT count(*) FROM pg_database WHERE datname = '$old'" 2>/dev/null)"
+    case "$side" in
+      1) err "$c: the swap completed: '$db' now holds the restored data; the previous data is in '$old'" ;;
+      0) err "$c: '$db' still holds its previous data (the swap did not happen)" ;;
+      *) err "$c: could not check whether the swap happened ('$db' vs '$old')" ;;
+    esac
     # Whichever side of the swap we stopped on, nothing may stay locked: the
     # database called $db (old or restored) and the kept copy $old.
-    reopen_or_tell "$c" "$u" "$db" "$old" && ok "$c: '$db' accepts connections"
-    pg "$c" "$u" -c "DROP DATABASE IF EXISTS \"$tmp\"" >/dev/null 2>&1 \
+    reopen_or_tell "$c" "$u" "$db" "$old" && ok "$c: '$db' accepts connections (checked)"
+    # The temporary database is ours: FORCE ends a load that outlived its client.
+    pg "$c" "$u" -c "DROP DATABASE IF EXISTS \"$tmp\" WITH (FORCE)" >/dev/null 2>&1 \
       || warn "$c: could not drop temporary database '$tmp' (the next restore drops it)"
   fi
   if [ -n "$VOL_INFLIGHT" ]; then
-    err "interrupted while restoring volume $VOL_INFLIGHT: its contents may be partial"
-    [ "${#stopped[@]}" -eq 0 ] \
-      || err "left STOPPED on purpose (check the volume, then: docker start ${stopped[*]})"
+    case "$VOL_PHASE" in
+      replacing)
+        err "interrupted while replacing the contents of volume $VOL_INFLIGHT: they may be partial"
+        [ "${#stopped[@]}" -eq 0 ] \
+          || err "left STOPPED on purpose (check the volume, then: docker start ${stopped[*]})" ;;
+      *)
+        if [ "$VOL_PHASE" = stopping ]; then
+          err "interrupted while stopping the containers of volume $VOL_INFLIGHT: the volume was not touched"
+        else
+          err "interrupted while restarting the containers of volume $VOL_INFLIGHT (its restore had finished, see above)"
+        fi
+        # Everything that was running before; `docker start` of a running one is a no-op.
+        for c in $VOL_USERS; do docker start "$c" >/dev/null 2>&1 || err "could not start $c: docker start $c"; done ;;
+    esac
   fi
   if [ "$rc" -ne 0 ] && { [ -n "$PG_INFLIGHT" ] || [ -n "$VOL_INFLIGHT" ]; }; then
     err "restore interrupted (exit $rc): NOT complete. Everything finished before this point stays restored."
@@ -241,12 +312,43 @@ trap on_exit EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
+trap 'exit 141' PIPE            # reader of our output gone: still run the trap
+
+# Wait (up to 30 s: the swap may wait 10 s in pg_terminate_backend) until no
+# other session of this restore is running on container $1, and none has
+# appeared for 1 s. The load (application_name $APP-load) is not waited for:
+# it can take long, and its database is dropped with FORCE.
+wait_for_restore_sessions() {
+  pg "$1" "$2" -c "DO \$\$
+DECLARE quiet int := 0;
+BEGIN
+  FOR i IN 1..300 LOOP
+    PERFORM pg_stat_clear_snapshot();   -- pg_stat_activity is cached per transaction
+    IF EXISTS (SELECT 1 FROM pg_stat_activity
+               WHERE application_name = '$APP' AND pid <> pg_backend_pid()) THEN
+      quiet := 0;
+    ELSE
+      quiet := quiet + 1;
+    END IF;
+    EXIT WHEN quiet >= 10;
+    PERFORM pg_sleep(0.1);
+  END LOOP;
+  IF quiet < 10 THEN RAISE EXCEPTION 'restore sessions still running after 30 s'; END IF;
+END \$\$" >/dev/null 2>&1 \
+    || err "$1: a statement of this restore may still be running in the container; check the databases below once it ends"
+}
 
 # Reopen databases $3... of container $1 (user $2); if that fails, say exactly
 # how to do it by hand. Never leaves a lock unreported.
 reopen_or_tell() {
-  local c="$1" u="$2" n; shift 2
-  pg "$c" "$u" -c "$(reopen_sql "$@")" >/dev/null 2>&1 && return 0
+  local c="$1" u="$2" n list="" locked; shift 2
+  for n in "$@"; do list+="${list:+, }'$n'"; done
+  # Reopen, then CHECK: only an empty "still locked" list counts as success.
+  if pg "$c" "$u" -c "$(reopen_sql "$@")" >/dev/null 2>&1 \
+     && locked="$(pg "$c" "$u" -At -c "SELECT coalesce(string_agg(datname, ' '), '') FROM pg_database WHERE datname IN ($list) AND NOT datallowconn" 2>/dev/null)" \
+     && [ -z "$locked" ]; then
+    return 0
+  fi
   err "$c: could not make these databases accept connections again: $*. Run:"
   for n in "$@"; do
     err "  docker exec $c psql -U $u -d postgres -c 'ALTER DATABASE \"$n\" WITH ALLOW_CONNECTIONS true'"
@@ -280,11 +382,6 @@ is_running() { grep -qx -- "$1" <<< "$RUNNING"; }
 # CREATE TABLE fails with "already exists", COPY collides with existing rows,
 # and psql still exits 0. So: load into an empty temporary database, stop on the
 # first error, and only then swap it in.
-pg() {
-  local c="$1" u="$2"; shift 2
-  docker exec "$c" psql -U "$u" -d postgres -X -q -v ON_ERROR_STOP=1 \
-    -c "SET client_min_messages = warning" "$@"
-}
 
 # Give database $2 the database-level properties of $1: owner, connection
 # limit, comment, GRANTs ON DATABASE, ALTER DATABASE ... SET and ALTER ROLE ...
@@ -305,10 +402,13 @@ DECLARE
     'session_preload_libraries', 'shared_preload_libraries', 'temp_tablespaces',
     'unix_socket_directories'];
 BEGIN
-  SELECT * INTO STRICT d FROM pg_database WHERE datname = '$1';
+  SELECT * INTO d FROM pg_database WHERE datname = '$1';
+  IF NOT FOUND THEN RAISE EXCEPTION 'live database % does not exist', '$1'; END IF;
   EXECUTE format('ALTER DATABASE %I OWNER TO %I', dst, pg_get_userbyid(d.datdba));
   EXECUTE format('ALTER DATABASE %I CONNECTION LIMIT %s', dst, d.datconnlimit);
   EXECUTE format('COMMENT ON DATABASE %I IS %L', dst, shobj_description(d.oid, 'pg_database'));
+  -- Re-granted as superuser, so the grantor becomes the owner (a grant a third
+  -- role made WITH GRANT OPTION would no longer be cascaded by its REVOKE).
   IF d.datacl IS NOT NULL THEN     -- NULL = defaults, which dst already has
     EXECUTE format('REVOKE ALL ON DATABASE %I FROM PUBLIC', dst);
     EXECUTE format('REVOKE ALL ON DATABASE %I FROM %I', dst, pg_get_userbyid(d.datdba));
@@ -339,12 +439,8 @@ SQL
 # copy this run just made ($2) always counts as kept, whatever the clock says.
 # Only exact names are matched, and a copy someone is connected to is not forced.
 prune_old_copies() {
-  local container="$1" user="$2" db="$3" just_made="$4" prefix="${3}__pre_restore_" n
-  local names
-  names="$(pg "$container" "$user" -At -c "SELECT datname FROM pg_database
-      WHERE left(datname, length('$prefix')) = '$prefix'
-        AND substr(datname, length('$prefix') + 1) ~ '^[0-9]{14}\$'
-      ORDER BY datname = '$just_made' DESC, datname DESC OFFSET $KEEP_PREVIOUS")" \
+  local container="$1" user="$2" db="$3" just_made="$4" n names
+  names="$(pg "$container" "$user" -At -c "$(old_copies_sql "$db" "$KEEP_PREVIOUS" "$just_made")")" \
     || { warn "$container: could not list old copies of '$db' to prune"; return 0; }
   for n in $names; do
     if pg "$container" "$user" -c "DROP DATABASE \"$n\"" >/dev/null 2>&1; then
@@ -371,7 +467,8 @@ restore_pg() {
     || { err "$container: could not create temporary database $tmp"; PG_INFLIGHT=""; return 1; }
 
   if ! gunzip -c "$dump" | docker exec -i "$container" \
-         psql -U "$user" -d "$tmp" -X -q -v ON_ERROR_STOP=1 --single-transaction >/dev/null; then
+         psql -U "$user" -d "dbname=$tmp application_name=$APP-load" \
+              -X -q -v ON_ERROR_STOP=1 --single-transaction >/dev/null; then
     err "$container: the dump did not load cleanly; live database '$db' left untouched"
     pg "$container" "$user" -c "DROP DATABASE IF EXISTS \"$tmp\"" >/dev/null 2>&1 || true
     PG_INFLIGHT=""; return 1
@@ -450,27 +547,28 @@ for vol in "${PLAN_VOL[@]+"${PLAN_VOL[@]}"}"; do
   # not be started at the end just because it mounts the volume.
   users="$(docker ps --filter "volume=$vol" --format '{{.Names}}')"
   stopped=() stop_failed=""
-  VOL_INFLIGHT="$vol"
+  VOL_INFLIGHT="$vol" VOL_PHASE=stopping VOL_USERS="$users"
   for c in $users; do
     if docker stop "$c" >/dev/null 2>&1; then stopped+=("$c"); else stop_failed="$c"; break; fi
   done
 
   if [ -n "$stop_failed" ]; then
     err "could not stop $stop_failed: volume $vol NOT restored (it is still in use)"
-    restart_stopped; VOL_INFLIGHT=""; FAILED+=("volume $vol"); continue
+    VOL_PHASE=restarting; restart_stopped; VOL_INFLIGHT="" VOL_PHASE=""; FAILED+=("volume $vol"); continue
   fi
 
-  rc=0
+  rc=0 VOL_PHASE=replacing
   docker run --rm -v "${vol}:/dst" -v "${SRC}:/backup:ro" alpine:3.21 \
     sh -c "$(volume_script "$tarname")" || rc=$?
   case "$rc" in
-    0) ok "restored volume $vol"; restart_stopped ;;
-    3) err "extracting $tarname failed; volume $vol left as it was"; restart_stopped; FAILED+=("volume $vol") ;;
-    *) err "restore of volume $vol failed midway (exit $rc): its contents may be partial"
+    0) VOL_PHASE=restarting; ok "restored volume $vol"; restart_stopped ;;
+    3) VOL_PHASE=restarting; err "extracting $tarname failed; volume $vol left as it was"; restart_stopped; FAILED+=("volume $vol") ;;
+    *) VOL_PHASE=""
+       err "restore of volume $vol failed midway (exit $rc): its contents may be partial"
        [ "${#stopped[@]}" -eq 0 ] || err "left STOPPED on purpose so they do not run on partial data: ${stopped[*]}"
        FAILED+=("volume $vol (partial, containers left stopped)") ;;
   esac
-  VOL_INFLIGHT=""
+  VOL_INFLIGHT="" VOL_PHASE=""
 done
 
 # --- 6. Verdict -----------------------------------------------------------------

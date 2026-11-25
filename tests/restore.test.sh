@@ -88,12 +88,14 @@ run_restore() {
 }
 
 # True if restore.sh wrote to a database or a volume, or stopped/started anything.
-touched_data() { grep -Eq '^(exec |run |stop |start )' "$FAKE_LOG"; }
+# The read-only listing of old copies to prune, shown before the confirmation
+# (application_name donalabs-restore-plan), does not count.
+touched_data() { grep -v '^exec [^ ]* psql .*application_name=donalabs-restore-plan ' "$FAKE_LOG" | grep -Eq '^(exec |run |stop |start )'; }
 # The calls that restore database <container> as <user>/<db>: load the dump into
 # <db>__restoring with ON_ERROR_STOP in one transaction, then swap it in.
 pg_restored() {
-  grep -qx "exec -i $1 psql -U $2 -d $3__restoring -X -q -v ON_ERROR_STOP=1 --single-transaction" "$FAKE_LOG" \
-    && grep -q "^exec $1 psql -U $2 -d postgres .* -1 .*ALTER DATABASE \"$3__restoring\" RENAME TO \"$3\"\$" "$FAKE_LOG"
+  grep -qx "exec -i $1 psql -U $2 -d dbname=$3__restoring application_name=donalabs-restore-load -X -q -v ON_ERROR_STOP=1 --single-transaction" "$FAKE_LOG" \
+    && grep -q "^exec $1 psql -U $2 -d dbname=postgres application_name=donalabs-restore .* -1 .*ALTER DATABASE \"$3__restoring\" RENAME TO \"$3\"\$" "$FAKE_LOG"
 }
 # Line number of the first fake-docker call matching an ERE (0 if none).
 line_of() { local n; n="$(grep -nE -m1 -- "$1" "$FAKE_LOG" | cut -d: -f1)"; echo "${n:-0}"; }
@@ -516,6 +518,10 @@ check "killed after locking n8n: then drops the temporary database (last call)" 
   bash -c "tail -1 '$FLAT' | grep -q 'DROP DATABASE IF EXISTS \"n8n__restoring\"'"
 check "killed after locking n8n: says so" grep -q 'interrupted while restoring donalabs-n8n-db (n8n)' <<< "$OUT"
 check "killed after locking n8n: says it is NOT complete" grep -q 'restore interrupted (exit 143): NOT complete' <<< "$OUT"
+# The lock call runs with stdout on /dev/null; the trap runs inside it and must
+# not inherit that (bash keeps the interrupted command's redirections).
+check "killed during a call with stdout on /dev/null: the trap's stdout is not lost" \
+  grep -q "'n8n' accepts connections (checked)" <<< "$OUT"
 check "killed after locking n8n: no volume was touched afterwards" not grep -q '^run ' "$FAKE_LOG"
 
 # Killed while a volume is being replaced: its state is unknown, so its
@@ -524,17 +530,67 @@ new_sandbox
 take_backup
 interrupt_at '^run .* -v donalabs_n8n_data:/dst '
 check "killed during a volume: exit 143" [ "$RC" -eq 143 ]
-check "killed during a volume: says which volume" grep -q 'interrupted while restoring volume donalabs_n8n_data' <<< "$OUT"
+check "killed during a volume: says which volume, and that it may be partial" \
+  grep -q 'interrupted while replacing the contents of volume donalabs_n8n_data: they may be partial' <<< "$OUT"
 check "killed during a volume: tells how to start what it left stopped" grep -q 'docker start donalabs-n8n' <<< "$OUT"
 check "killed during a volume: its container is not started" not grep -qx 'start donalabs-n8n' "$FAKE_LOG"
 check "killed during a volume: no database trap action" not grep -q 'ALLOW_CONNECTIONS true' <<< "$(grep -n . "$FAKE_LOG" | tail -3)"
 check "killed during a volume: does not say restore complete" not grep -q 'restore complete' <<< "$OUT"
+
+# Output piped and its reader gone (`2>&1 | tee log`, then the SSH session
+# drops): printing raises SIGPIPE. The trap must still run and reopen.
+new_sandbox
+take_backup
+rm -f "$FAKE_LOG.killed"; : > "$FAKE_LOG"
+FIFO="$SB/out.fifo"; rm -f "$FIFO"; mkfifo "$FIFO"
+cat "$FIFO" > "$SB/out.txt" & READER=$!
+set +e
+FAKE_KILL_ON='^exec donalabs-n8n-db psql .*"n8n" WITH ALLOW_CONNECTIONS false' \
+  FAKE_KILL_FIRST="kill $READER" FAKE_KILL_SIG=HUP \
+  PATH="$SB/bin:$PATH" "$SB/scripts/restore.sh" "$BK" > "$FIFO" 2>&1 <<< yes; RC=$?
+set -e
+wait "$READER" 2>/dev/null || true; rm -f "$FIFO" "$FAKE_LOG.killed"
+flatten_log
+check "SSH drop with output piped (reader gone): the trap still reopens n8n" \
+  grep -q "^exec donalabs-n8n-db psql .*datname IN ('n8n', 'n8n__pre_restore_[0-9]*') AND NOT datallowconn" "$FLAT"
+check "SSH drop with output piped (reader gone): and drops the temporary database" \
+  bash -c "tail -1 '$FLAT' | grep -q 'DROP DATABASE IF EXISTS \"n8n__restoring\" WITH (FORCE)'"
+check "SSH drop with output piped (reader gone): exit 129 (SIGHUP)" [ "$RC" -eq 129 ]
+
+# SIGPIPE itself (the reader died while the restore was running): same cleanup.
+new_sandbox
+take_backup
+FAKE_KILL_SIG=PIPE interrupt_at '^exec donalabs-n8n-db psql .*"n8n" WITH ALLOW_CONNECTIONS false'
+flatten_log
+check "SIGPIPE after locking n8n: the trap reopens it" \
+  grep -q "^exec donalabs-n8n-db psql .*datname IN ('n8n', 'n8n__pre_restore_[0-9]*') AND NOT datallowconn" "$FLAT"
+check "SIGPIPE after locking n8n: says it is NOT complete" grep -q 'restore interrupted (exit 141): NOT complete' <<< "$OUT"
+
+# The trap waits for sessions of this restore still running in the container
+# (real behaviour checked in restore-postgres.test.sh), then reopens and CHECKS.
+check "trap: waits for other sessions of this restore before reopening" \
+  bash -c "w=\$(grep -n \"application_name = 'donalabs-restore' AND pid <> pg_backend_pid()\" '$FLAT' | head -1 | cut -d: -f1); r=\$(grep -n \"datname IN ('n8n', 'n8n__pre_restore_\" '$FLAT' | head -1 | cut -d: -f1); [ -n \"\$w\" ] && [ -n \"\$r\" ] && [ \"\$w\" -lt \"\$r\" ]"
+check "trap: verifies nothing is still locked after reopening" \
+  grep -q "^exec donalabs-n8n-db psql .*string_agg(datname, ' ').* AND NOT datallowconn" "$FLAT"
+
+# Killed while STOPPING a volume's containers: the volume was not touched, so
+# they are started again (only "replacing" leaves them stopped).
+new_sandbox
+take_backup
+interrupt_at '^stop donalabs-penpot-frontend$'
+check "killed while stopping: exit 143" [ "$RC" -eq 143 ]
+check "killed while stopping: says the volume was not touched" \
+  grep -q 'interrupted while stopping the containers of volume donalabs_penpot_assets: the volume was not touched' <<< "$OUT"
+check "killed while stopping: the volume is not rewritten" not grep -q -- '-v donalabs_penpot_assets:/dst ' "$FAKE_LOG"
+check "killed while stopping: every container of the volume is started again" \
+  bash -c "grep -qx 'start donalabs-penpot-frontend' '$FAKE_LOG' && grep -qx 'start donalabs-penpot-backend' '$FAKE_LOG'"
 
 # The trap cannot reopen (database server gone, say): it prints the exact fix.
 new_sandbox
 take_backup
 FAKE_FAIL_ON='ALLOW_CONNECTIONS true' interrupt_at '^exec donalabs-n8n-db psql .*"n8n" WITH ALLOW_CONNECTIONS false'
 check "trap cannot reopen: exit 143" [ "$RC" -eq 143 ]
+# (the reopen runs >/dev/null 2>&1: if the trap kept that, this would be lost)
 check "trap cannot reopen: prints the command to do it by hand" \
   grep -qF "docker exec donalabs-n8n-db psql -U n8n -d postgres -c 'ALTER DATABASE \"n8n\" WITH ALLOW_CONNECTIONS true'" <<< "$OUT"
 
@@ -548,8 +604,9 @@ check "failed swap: exit 1" [ "$RC" -eq 1 ]
 check "failed swap: reported" grep -q 'NOT restored: database donalabs-n8n-db' <<< "$OUT"
 check "failed swap: n8n and its would-be copy are reopened" \
   grep -q "^exec donalabs-n8n-db psql .*datname IN ('n8n', 'n8n__pre_restore_[0-9]*') AND NOT datallowconn" "$FLAT"
-check "failed swap: no pruning for n8n" not grep -q "^exec donalabs-n8n-db psql .*OFFSET [0-9]" "$FLAT"
-check "failed swap: pruning still runs for a restored one" grep -q "^exec donalabs-calcom-db psql .*OFFSET 2" "$FLAT"
+# (the "-plan" listing before the prompt is not pruning: match the real one)
+check "failed swap: no pruning for n8n" not grep -q "^exec donalabs-n8n-db psql .*application_name=donalabs-restore -X.*OFFSET [0-9]" "$FLAT"
+check "failed swap: pruning still runs for a restored one" grep -q "^exec donalabs-calcom-db psql .*application_name=donalabs-restore -X.*OFFSET 2" "$FLAT"
 check "failed swap: the other databases are still restored" pg_restored donalabs-calcom-db calcom calendso
 check "failed swap: not an interruption" not grep -q 'interrupted' <<< "$OUT"
 
@@ -573,18 +630,18 @@ check "uninterrupted restore prints no interruption message" not grep -q 'interr
 # --- 16. database properties are copied BEFORE the swap, retention after ------
 flatten_log
 c=donalabs-calcom-db
-d_="$(flat_line_of "^exec -i $c psql -U calcom -d calendso__restoring ")"
+d_="$(flat_line_of "^exec -i $c psql -U calcom -d dbname=calendso__restoring ")"
 p_="$(flat_line_of "^exec $c psql .*ALTER DATABASE %I OWNER TO %I")"
 l_="$(flat_line_of "^exec $c psql .*\"calendso\" WITH ALLOW_CONNECTIONS false")"
 w_="$(flat_line_of "^exec $c psql .* -1 .*RENAME TO \"calendso\"")"
-r_="$(flat_line_of "^exec $c psql .*SELECT datname FROM pg_database.*calendso__pre_restore_")"
+r_="$(flat_line_of "^exec $c psql .*application_name=donalabs-restore -X.*SELECT datname FROM pg_database.*calendso__pre_restore_")"
 check "order: load, copy grants/settings, lock, swap, prune" \
   bash -c "[ $d_ -gt 0 ] && [ $d_ -lt $p_ ] && [ $p_ -lt $l_ ] && [ $l_ -lt $w_ ] && [ $w_ -lt $r_ ]"
 check "the copy reads the LIVE database and writes the temporary one" \
   grep -q "^exec $c psql .*dst CONSTANT text := 'calendso__restoring'.*WHERE datname = 'calendso';" "$FLAT"
 
 # --- 17. RESTORE_KEEP_PREVIOUS is validated before anything is touched --------
-for bad in 0 -1 abc 1.5 " 2"; do
+for bad in 0 -1 abc 1.5 " 2" 99999 99999999999999999999; do
   RESTORE_KEEP_PREVIOUS="$bad" run_restore yes "$BK"
   check "RESTORE_KEEP_PREVIOUS='$bad': refused, nothing touched, not asked" \
     bash -c "[ $RC -eq 1 ] && ! grep -Eq '^(exec |run |stop |start )' '$FAKE_LOG' && ! grep -q \"Type 'yes'\" <<< \"\$1\"" _ "$OUT"
@@ -599,6 +656,12 @@ check "the retention in use is shown" grep -q 'RESTORE_KEEP_PREVIOUS=5' <<< "$OU
 check "pruning keeps 5 (OFFSET 5)" grep -q 'OFFSET 5' "$FAKE_LOG"
 run_restore yes --help
 check "--help documents RESTORE_KEEP_PREVIOUS" grep -q 'RESTORE_KEEP_PREVIOUS' <<< "$OUT"
+RESTORE_KEEP_PREVIOUS=1 run_restore no "$BK"
+check "RESTORE_KEEP_PREVIOUS=1 warns, before asking, that a retry loses the original" \
+  bash -c "grep -q 'RESTORE_KEEP_PREVIOUS=1: if this restore turns out wrong' <<< \"\$1\" && [ $RC -eq 0 ]" _ "$OUT"
+run_restore no "$BK"
+check "the default (2) does not warn" not grep -q 'turns out wrong' <<< "$OUT"
+check "the old-copy listing before the prompt is read-only and does not count as touching" not touched_data
 
 echo
 echo "restore.sh: $PASS passed, $FAIL failed"

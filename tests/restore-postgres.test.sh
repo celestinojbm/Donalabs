@@ -133,11 +133,15 @@ check "dump is real SQL" bash -c "gunzip -c '$BK/donalabs-calcom-db_pg.sql.gz' |
 # the test do that.
 LAST_START=""
 run_restore() {
+  # restore.sh names its copies <db>__pre_restore_<second>, taken AFTER its
+  # pre-prompt checks. Start in a second later than the one the previous run
+  # ENDED in: its stamp is <= that, so two runs never share one (waiting from
+  # the previous start was not enough under load).
   while [ "$(date -u +%s)" = "$LAST_START" ]; do sleep 0.1; done
-  LAST_START="$(date -u +%s)"
   set +e
   OUT="$(PATH="$SB/bin:$PATH" "$SB/scripts/restore.sh" "$@" 2>&1 <<< yes)"; RC=$?
   set -e
+  LAST_START="$(date -u +%s)"
 }
 
 # --- 1. backup -> damage -> restore gives back exactly the backed-up rows ---------

@@ -116,7 +116,7 @@ donalabs/
 | Stop (keep data) | `./stop.sh` · `./stop.sh --down` (remove containers, keep volumes) |
 | Update to pinned tags | `./update.sh` (backs up first, then pulls + recreates) |
 | Back up | `./backup.sh` · `--consistent` (brief downtime, crash-consistent) · `--allow-partial` (subset of the stack) |
-| Restore | `./scripts/restore.sh backups/<timestamp>` · `--allow-incomplete` (restore what an incomplete backup has) · `--ignore-key-mismatch` (restore although `.env` keys differ from the backup's) |
+| Restore | `./scripts/restore.sh backups/<timestamp>` · `--allow-incomplete` (restore what an incomplete backup has) · `--ignore-key-mismatch` (restore although `.env` keys differ from the backup's) · `RESTORE_KEEP_PREVIOUS=N` (old database copies kept, default 2, 1–9999) |
 | Health check | `./scripts/health.sh` |
 | Reverse proxy (HTTPS) | `./scripts/proxy.sh up` · `down` · `validate` |
 | Create shared network | `./scripts/init-network.sh` (also done by `start.sh`) |
@@ -163,11 +163,38 @@ restores anyway. Session-only keys (`CALCOM_NEXTAUTH_SECRET`,
 just produce a warning.
 
 - **Databases** (must be running): each dump is loaded into a temporary
-  database with `ON_ERROR_STOP` in a single transaction, then swapped in by
-  renaming. If anything fails the live database is left as it was. The previous
+  database with `ON_ERROR_STOP` in a single transaction, given the live
+  database's own **database-level** grants (`GRANT ... ON DATABASE`), settings
+  (`ALTER DATABASE ... SET`, `ALTER ROLE ... IN DATABASE ... SET`), owner,
+  connection limit and comment (a `pg_dump` without `--create` does not carry
+  them; table/schema grants come from the dump itself), then swapped in by
+  renaming. Because they are copied from the **live** database, a restore does
+  **not** undo a database-level permission change made after the backup (an
+  unwanted `GRANT CONNECT`, an `ALTER ROLE ... IN DATABASE ... SET`): revert
+  those by hand. Re-applied grants get the database owner as grantor. If anything fails the live database is left as it was. The previous
   database is kept as `<db>__pre_restore_<timestamp>` so a restore can be
-  undone; drop it once you have verified the result (the script prints the
-  command). It takes as much disk as the live database.
+  undone; it takes as much disk as the live database. Only the newest
+  `RESTORE_KEEP_PREVIOUS` copies per database are kept (default **2**, integer
+  1–9999, from the environment or `.env`): older ones are dropped after that
+  database is restored, and listed by name **before** the confirmation. Two, not one, so that a second attempt (say, after
+  restoring the wrong backup) does not drop the only copy of the original data
+  (with `1` the script warns about exactly that).
+  A copy someone is connected to is not forced; only exact
+  `<db>__pre_restore_<14 digits>` names are pruned.
+- **Interrupted** (Ctrl-C, SSH drop, `kill`, a closed output pipe, unexpected
+  error): an exit trap first waits (up to 30 s) for statements of the restore
+  that outlive their killed `docker exec` client (they keep running inside the
+  container), then makes any database it had locked for the swap accept
+  connections again, **checks** that it does, says whether the swap had already
+  happened (`<db>` holds the restored data and the previous data is in the copy)
+  or not, drops the temporary database and says the restore is NOT complete. If
+  the check fails, or a statement is still running after 30 s, it prints the
+  exact `psql` command to run. A volume: interrupted while its containers were
+  being stopped or restarted, they are started again; while its contents were
+  being replaced, they stay **stopped** (contents may be partial) and the
+  `docker start` command is printed. `kill -9` (SIGKILL) cannot be trapped: after
+  it, check `SELECT datname FROM pg_database WHERE NOT datallowconn` in each
+  database container (only `template0` should be listed).
 - **Volumes**: running containers that use the volume are stopped, the tarball
   is extracted into a staging directory on the same volume, and only then
   replaces the old contents (this needs free space for a second copy). If the

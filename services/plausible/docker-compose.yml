@@ -64,7 +64,9 @@ services:
     image: ghcr.io/plausible/community-edition:${PLAUSIBLE_IMAGE_TAG:-v3.2.1}
     container_name: donalabs-plausible
     restart: unless-stopped
-    command: sh -c "/entrypoint.sh db createdb && /entrypoint.sh db migrate && /entrypoint.sh run"
+    # createdb -> migrate -> run, retrying the first two while Postgres and
+    # ClickHouse come up (on a reboot Docker ignores depends_on). See the script.
+    command: ["sh", "/donalabs/start-plausible.sh"]
     depends_on:
       plausible_db:
         condition: service_healthy
@@ -84,8 +86,13 @@ services:
       DATABASE_URL: postgres://${PLAUSIBLE_DB_USER:-plausible}:${PLAUSIBLE_DB_PASSWORD}@plausible_db:5432/${PLAUSIBLE_DB_NAME:-plausible}
       CLICKHOUSE_DATABASE_URL: http://plausible_events_db:8123/plausible_events_db
       TZ: ${TZ:-UTC}
+      # --- start-up retries (services/plausible/start-plausible.sh) ---
+      DONALABS_START_ATTEMPTS: ${PLAUSIBLE_START_ATTEMPTS:-10}
+      DONALABS_START_DELAY: ${PLAUSIBLE_START_DELAY:-5}
+      DONALABS_START_MAX_DELAY: ${PLAUSIBLE_START_MAX_DELAY:-30}
     volumes:
       - plausible_data:/var/lib/plausible
+      - ./start-plausible.sh:/donalabs/start-plausible.sh:ro
     ulimits:
       nofile:
         # Official Plausible value is 65535; override with PLAUSIBLE_APP_NOFILE

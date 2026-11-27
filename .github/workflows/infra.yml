@@ -65,7 +65,7 @@ jobs:
       - name: Verify helper scripts are executable
         run: |
           rc=0
-          for s in start.sh stop.sh update.sh backup.sh scripts/*.sh services/ytdlp/ytdlp.sh tests/run.sh tests/*.test.sh tests/fakes/docker; do
+          for s in start.sh stop.sh update.sh backup.sh scripts/*.sh services/ytdlp/ytdlp.sh services/plausible/start-plausible.sh tests/run.sh tests/*.test.sh tests/fakes/docker; do
             if [ -x "$s" ]; then
               echo "  ok   $s"
             else
@@ -81,13 +81,14 @@ jobs:
         run: |
           shellcheck --severity=warning --external-sources \
             start.sh stop.sh update.sh backup.sh scripts/*.sh services/ytdlp/ytdlp.sh \
-            tests/*.sh tests/fakes/docker
+            services/plausible/start-plausible.sh tests/*.sh tests/fakes/docker
 
       - name: Script tests
         # Behavioural tests for the helper scripts (backup.sh completeness,
         # exit codes, retention safety; generate-secrets.sh contract with
         # .env.example, formats, idempotency; restore.sh guards, failure
-        # handling and a real backup -> restore round trip). They use
+        # handling and a real backup -> restore round trip; the Plausible
+        # start-up retry wrapper under every POSIX shell found). They use
         # tests/fakes/docker and throwaway sandboxes, so no Docker daemon is
         # needed and nothing is pulled. restore-postgres.test.sh starts a
         # throwaway cluster from the runner's preinstalled PostgreSQL (CI=true

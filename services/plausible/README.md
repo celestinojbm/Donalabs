@@ -56,6 +56,9 @@ Set in the root `.env` (copy `.env.example` → `.env`, then run `./scripts/gene
 | `PLAUSIBLE_DB_NAME` | Postgres database name | `plausible` |
 | `PLAUSIBLE_CH_NOFILE` | ClickHouse file-descriptor (nofile) limit | `262144` — lower only on constrained hosts where `ulimit -Hn` is below this |
 | `PLAUSIBLE_APP_NOFILE` | App container file-descriptor limit | `65535` — lower only if the host hard limit is below this |
+| `PLAUSIBLE_START_ATTEMPTS` | Tries per start-up step (`createdb`, `migrate`) before the container gives up | `10` (integer ≥ 1) |
+| `PLAUSIBLE_START_DELAY` | Seconds before the first retry; doubles on each retry | `5` (integer ≥ 0) |
+| `PLAUSIBLE_START_MAX_DELAY` | Cap for that doubling wait, in seconds | `30` |
 
 Shared globals that also apply: `TZ` (timezone), `BIND_ADDR` (host interface published ports bind to, default `127.0.0.1`), `EDGE_NETWORK` (shared network name, `donalabs_edge`).
 
@@ -159,6 +162,7 @@ curl -fsS http://localhost:8210/api/health
 ## 10. Troubleshooting
 
 - **Dashboard won't come up / restart loops:** the app waits for both databases to report healthy (`depends_on: service_healthy`). Check `docker compose logs plausible_db plausible_events_db` first.
+- **`[donalabs-start] db createdb failed ... retrying` in the app log:** normal right after a host reboot. Docker's restart policy ignores `depends_on`, so the app can start before its databases; `start-plausible.sh` (the container's command, bind-mounted from this folder) retries `createdb` and `migrate` instead of letting the container restart. A `RuntimeError "killed"` just before it is how `createdb` reports that it could not connect. If it ends in `giving up`, the databases did not come up in time (about 3.5 min with the defaults) or the credentials are wrong: the container exits and Docker restarts it as before. Read the line above the first retry for the real cause.
 - **ClickHouse fails to start (IPv6 / bind errors):** confirm the four `services/plausible/clickhouse/*.xml` files exist and are mounted read-only; `ipv4-only.xml` is required on IPv6-less bridges.
 - **ClickHouse exits on file-descriptor / ulimit errors:** the host's hard limit is below the default `262144`. Lower `PLAUSIBLE_CH_NOFILE` (and `PLAUSIBLE_APP_NOFILE`) in `.env` to at or under `ulimit -Hn`, then restart.
 - **Another container can't reach it:** use `http://plausible:8000` (internal service name + port 8000), **not** `localhost:8210`. Confirm the calling container is attached to `donalabs_edge`.

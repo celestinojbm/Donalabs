@@ -220,6 +220,18 @@ None block operation. Recorded for future hardening:
    minute. Optional future smoothing: an explicit startup dependency-wait or a
    retry wrapper in the Plausible entrypoint. *(Left unchanged — this report is
    documentation-only.)*
+
+   > **Update (2026-11-27): addressed.** The app's command is now
+   > `services/plausible/start-plausible.sh`, which retries `createdb` and
+   > `migrate` with a doubling wait (5 s → 30 s cap, 10 attempts) before
+   > `exec`ing the app. Reproduced on Docker 29.9.3 with v3.2.1 by starting the
+   > app with both databases stopped for 20 s: the old command restarted the
+   > container **8 times**; the wrapper restarted it **0 times** (3 retries) and
+   > the app came up. In that reproduction `createdb` logged the same
+   > `RuntimeError "killed"` seen in §7 right after `nxdomain`/connection
+   > errors, with no memory pressure: the race alone explains that message, so
+   > it is weaker evidence of memory pressure than §9 assumes (the RAM sizing
+   > there still stands on the measured idle draw).
 3. **⚠️ ENV-SPECIFIC — n8n outbound cert warning.** Disappears outside the
    intercepting proxy; no action needed for production.
 

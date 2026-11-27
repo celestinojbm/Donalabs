@@ -263,7 +263,7 @@ pnpm install --frozen-lockfile && pnpm typecheck && pnpm lint && pnpm build
 docker compose config -q                            # root (include of all services)
 for f in services/*/docker-compose.yml; do (cd "$(dirname "$f")" && docker compose --env-file "$OLDPWD/.env" config -q); done
 docker compose -f proxy/docker-compose.yml --env-file .env config -q
-shellcheck --severity=warning --external-sources start.sh stop.sh update.sh backup.sh scripts/*.sh services/ytdlp/ytdlp.sh tests/*.sh tests/fakes/docker
+shellcheck --severity=warning --external-sources start.sh stop.sh update.sh backup.sh scripts/*.sh services/ytdlp/ytdlp.sh services/plausible/start-plausible.sh tests/*.sh tests/fakes/docker
 ./tests/run.sh                                      # script tests (fake docker, no daemon)
 
 # CI routing + gate (from repo root)

@@ -101,7 +101,9 @@ case "${1:-}" in
     [ "${2:-}" = "version" ] && { echo "Docker Compose version v2-stub"; exit 0; }
     if [ "${2:-}" = "ps" ]; then
       case "$*" in
-        *'{{.State}}'*) [ -z "${FAKE_PS:-}" ] || printf '%s\n' "$FAKE_PS" ;;
+        *'{{.State}}'*)
+          [ -z "${FAKE_PS_FAIL:-}" ] || { echo "template: unknown field" >&2; exit 1; }
+          [ -z "${FAKE_PS:-}" ] || printf '%s\n' "$FAKE_PS" ;;
         *) echo "NAME STATUS" ;;
       esac
     fi
@@ -111,7 +113,7 @@ esac
 SH
   chmod +x "$SB/bin/docker" "$SB/scripts/health.sh"
   : > "$WORK/status"
-  export FAKE_PS=""
+  export FAKE_PS="" FAKE_PS_FAIL=""
 }
 
 run_health() {
@@ -204,6 +206,18 @@ new_sandbox
 export FAKE_PS=$'donalabs-calcom running starting\ndonalabs-init exited '
 run_health
 check "starting / exited one-shot: exit 0" [ "$RC" -eq 0 ]
+
+# Compose cannot list state/health: the skip is announced, endpoints still decide.
+new_sandbox
+export FAKE_PS_FAIL=1
+run_health
+check "ps --format fails, endpoints up: exit 0" [ "$RC" -eq 0 ]
+check "ps --format fails: warns that container health was not checked" grep -q 'container health NOT checked' <<< "$OUT"
+new_sandbox
+export FAKE_PS_FAIL=1
+echo "/alive 503" > "$WORK/status"
+run_health
+check "ps --format fails, an endpoint down: exit 1" [ "$RC" -eq 1 ]
 
 echo "health.sh: ${PASS} passed, ${FAIL} failed"
 [ "$FAIL" -eq 0 ]

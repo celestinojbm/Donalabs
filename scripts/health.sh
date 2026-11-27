@@ -26,8 +26,14 @@ echo "== Container status =="
 dc ps --format 'table {{.Name}}\t{{.Status}}' 2>/dev/null || dc ps
 # A container can still answer HTTP while Docker marks it unhealthy, or answer
 # between crashes while it is restart-looping: both make the stack not healthy.
-bad="$(dc ps --format '{{.Name}} {{.State}} {{.Health}}' 2>/dev/null \
-         | awk '$2 == "restarting" || $3 == "unhealthy" { print $1 " (" ($3 == "unhealthy" ? "unhealthy" : $2) ")" }')" || bad=""
+# If Compose cannot list them (e.g. a version without .Health in --format), say
+# so: the endpoint probes still decide the exit status, but the skip is visible.
+if ps_out="$(dc ps --format '{{.Name}} {{.State}} {{.Health}}' 2>/dev/null)"; then
+  bad="$(awk '$2 == "restarting" || $3 == "unhealthy" { print $1 " (" ($3 == "unhealthy" ? "unhealthy" : $2) ")" }' <<< "$ps_out")"
+else
+  bad=""
+  warn "could not read container state/health from docker compose: container health NOT checked"
+fi
 if [ -n "$bad" ]; then
   rc=1
   while IFS= read -r line; do err "container not healthy: $line"; done <<< "$bad"

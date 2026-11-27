@@ -26,11 +26,17 @@
 #   DONALABS_START_DELAY      first wait in seconds, integer >= 0  (default 5)
 #   DONALABS_START_MAX_DELAY  cap for the doubling wait, >= 0      (default 30)
 #   DONALABS_ENTRYPOINT       upstream entrypoint (tests only) (/entrypoint.sh)
+#   DONALABS_SLEEP            sleep command (tests only)             (sleep)
+#
+# DONALABS_SLEEP exists because a fake `sleep` on PATH is not enough: a busybox
+# built with "prefer applets" (Ubuntu's, used by CI) runs its own sleep applet
+# and never looks at PATH.
 #
 # POSIX sh: the image is Alpine (busybox ash), there is no bash.
 # =============================================================================
 
 ENTRYPOINT="${DONALABS_ENTRYPOINT:-/entrypoint.sh}"
+SLEEP="${DONALABS_SLEEP:-sleep}"
 ATTEMPTS="${DONALABS_START_ATTEMPTS:-10}"
 DELAY="${DONALABS_START_DELAY:-5}"
 MAX_DELAY="${DONALABS_START_MAX_DELAY:-30}"
@@ -98,7 +104,7 @@ step() {
       return "$rc"
     fi
     log "db $1 failed (exit $rc) on attempt $n/$ATTEMPTS; retrying in ${wait_s}s"
-    run_child sleep "$wait_s"
+    run_child "$SLEEP" "$wait_s"
     n=$((n + 1))
     wait_s=$((wait_s * 2))
     [ "$wait_s" -gt "$MAX_DELAY" ] && wait_s=$MAX_DELAY

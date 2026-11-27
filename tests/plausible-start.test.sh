@@ -12,7 +12,8 @@
 #     on to the running step.
 #
 # The upstream /entrypoint.sh and `sleep` are replaced by fakes that log their
-# calls, so no Docker daemon or image is needed. The script runs under every
+# calls (via DONALABS_ENTRYPOINT / DONALABS_SLEEP, not PATH: Ubuntu's busybox
+# prefers its own sleep applet over PATH), so no Docker daemon or image is needed. The script runs under every
 # POSIX shell found among sh, dash and busybox sh (the image uses busybox ash).
 #
 #   bash tests/plausible-start.test.sh
@@ -83,7 +84,7 @@ reset() {
 # Killed after 30 s, so a regression that loops forever fails (RC 137).
 start() {
   set +e
-  timeout -s KILL 30 env DONALABS_ENTRYPOINT="$SB/entrypoint" PATH="$SB/bin:$PATH" "$1" "$SCRIPT" 2> "$SB/err"
+  timeout -s KILL 30 env DONALABS_ENTRYPOINT="$SB/entrypoint" DONALABS_SLEEP="$SB/bin/sleep" "$1" "$SCRIPT" 2> "$SB/err"
   RC=$?
   set -e
   OUT_LOG="$(cat "$LOG")"
@@ -134,7 +135,7 @@ for SH in "${SHELLS[@]}"; do
 
   reset
   set +e
-  DONALABS_ENTRYPOINT="$SB/entrypoint" PATH="$SB/bin:$PATH" "$SH" "$SCRIPT" 2>/dev/null &
+  DONALABS_ENTRYPOINT="$SB/entrypoint" DONALABS_SLEEP="$SB/bin/sleep" "$SH" "$SCRIPT" 2>/dev/null &
   pid=$!
   set -e
   bounded_wait "$pid"
@@ -164,6 +165,18 @@ for SH in "${SHELLS[@]}"; do
   reset; echo 1 > "$STATE/createdb.fail"; export DONALABS_START_DELAY=08
   start "$SH"
   eq "[$label] leading zero is decimal (08 -> 8)" "sleep 8" "$(grep '^sleep' <<< "$OUT_LOG")"
+
+  # Without DONALABS_SLEEP (as in the container) the wait is a real `sleep`.
+  reset; echo 1 > "$STATE/createdb.fail"; export DONALABS_START_DELAY=1
+  t0=$(date +%s%N)
+  set +e
+  timeout -s KILL 30 env DONALABS_ENTRYPOINT="$SB/entrypoint" "$SH" "$SCRIPT" 2>/dev/null
+  RC=$?
+  set -e
+  ms=$(( ($(date +%s%N) - t0) / 1000000 ))
+  eq "[$label] default sleep: recovered start exits 0" 0 "$RC"
+  check "[$label] default sleep: really waits (>= 1 s, got ${ms} ms)" test "$ms" -ge 1000
+  eq "[$label] default sleep: the fake is not used" "" "$(grep '^sleep' "$LOG" || true)"
 
   # --- giving up -----------------------------------------------------------------
   reset; echo 99 > "$STATE/migrate.fail"; echo 7 > "$STATE/migrate.rc"; export DONALABS_START_ATTEMPTS=3
@@ -196,7 +209,7 @@ for SH in "${SHELLS[@]}"; do
 
   # --- signals -------------------------------------------------------------------
   reset; echo 99 > "$STATE/createdb.fail"; export DONALABS_START_DELAY=30 REAL_SLEEP_PATH="$REAL_SLEEP"
-  DONALABS_ENTRYPOINT="$SB/entrypoint" PATH="$SB/bin:$PATH" "$SH" "$SCRIPT" 2> "$SB/err" &
+  DONALABS_ENTRYPOINT="$SB/entrypoint" DONALABS_SLEEP="$SB/bin/sleep" "$SH" "$SCRIPT" 2> "$SB/err" &
   pid=$!
   for _ in $(seq 1 50); do grep -q '^sleep 30' "$LOG" && break; "$REAL_SLEEP" 0.1; done
   t0=$SECONDS
@@ -208,7 +221,7 @@ for SH in "${SHELLS[@]}"; do
   eq "[$label] SIGTERM during a wait: nothing runs after" 0 "$(grep -c '^db migrate$' "$LOG" || true)"
 
   reset; touch "$STATE/createdb.hang"
-  DONALABS_ENTRYPOINT="$SB/entrypoint" PATH="$SB/bin:$PATH" "$SH" "$SCRIPT" 2>/dev/null &
+  DONALABS_ENTRYPOINT="$SB/entrypoint" DONALABS_SLEEP="$SB/bin/sleep" "$SH" "$SCRIPT" 2>/dev/null &
   pid=$!
   for _ in $(seq 1 50); do grep -q '^createdb hanging' "$LOG" && break; "$REAL_SLEEP" 0.1; done
   kill -TERM "$pid"

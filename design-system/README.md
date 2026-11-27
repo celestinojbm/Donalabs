@@ -24,7 +24,8 @@ selected explicitly over its new Base UI default — is in
 ```
 design-system/
 ├── apps/
-│   └── showcase/          Next.js 16 app — the living style guide (this is what you run)
+│   ├── showcase/          Next.js 16 app — the living style guide
+│   └── landing/           Donalabs marketing landing (en/es), port 3100
 ├── packages/
 │   ├── ui/                 @donalabs/ui — the component library other projects import
 │   │   └── src/
@@ -45,7 +46,7 @@ design-system/
 ```bash
 cd design-system
 pnpm install
-pnpm dev        # starts the showcase app — http://localhost:3000
+pnpm dev        # showcase on http://localhost:3000, landing on http://localhost:3100
 ```
 
 ```bash
